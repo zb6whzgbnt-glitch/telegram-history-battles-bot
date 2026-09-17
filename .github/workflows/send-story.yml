@@ -1,0 +1,55 @@
+name: Send kids story
+
+on:
+  schedule:
+    # Asia/Riyadh UTC+3 → every 3h at :00 local
+    - cron: "0 21,0,3,6,9,12,15,18 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: kids-story-send
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
+      - name: Install Python deps
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+
+      - name: Restore story database
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: kids-bot-db-${{ github.run_id }}
+          restore-keys: |
+            kids-bot-db-
+
+      - name: Send story
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SUBSCRIBER_CHAT_IDS: ${{ secrets.SUBSCRIBER_CHAT_IDS }}
+          TZ: Asia/Riyadh
+          PYTHONUNBUFFERED: "1"
+          CMD_POLL_SECONDS: "30"
+        run: |
+          mkdir -p data
+          PYTHONPATH=. python scripts/gha_send_story.py all
