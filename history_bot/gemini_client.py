@@ -6,17 +6,25 @@ import time
 from google import genai
 from google.genai import types
 
-from .config import FEMALE_VOICE, GEMINI_API_KEY, MALE_VOICE, TEXT_MODEL, TTS_MODEL
+from .config import GEMINI_API_KEY, TEXT_MODEL, TTS_MODEL, TTS_VOICE
 
 log = logging.getLogger("history_bot.gemini")
 _client = None
 
+# Fixed TTS delivery instruction — same on every call (single or chunked).
+TTS_INSTRUCTION = (
+    "اقرأ النص بنبرة راوية قصص أطفال، بصوت هادئ ومستقر، "
+    "ومخارج حروف واضحة وسرعة معتدلة وثابتة تماماً من البداية للنهاية."
+)
 
 _TASHKEEL_RE = re.compile(r"[\u064B-\u065F\u0670]")
 
 
 def strip_tashkeel(text: str) -> str:
-    """Remove Arabic diacritics; keep letters and punctuation only."""
+    """Remove Arabic diacritics; keep letters and punctuation only.
+
+    Kept for optional tooling; arabize + TTS now KEEP full tashkeel.
+    """
     return _TASHKEEL_RE.sub("", text)
 
 
@@ -50,9 +58,6 @@ def enforce_audio_budget(title: str, body: str, age_band: str) -> tuple[str, str
     return title, out
 
 
-
-
-
 def client() -> genai.Client:
     global _client
     if _client is None:
@@ -80,7 +85,7 @@ def _call_with_retry(fn, tries: int = 5, base: float = 2.0):
 
 
 def _local_arabize(story: dict, age_band: str, genre: str) -> tuple[str, str]:
-    """Fallback fully-Arabized short story when Gemini text is down."""
+    """Fallback fully-Arabized short story (with tashkeel) when Gemini text is down."""
     names = {
         "animals": ("سَارَةُ الْقِطَّةُ", "يُوسُفُ الْأَسَدُ", "نُورَةُ الْعُصْفُورَةُ"),
         "legend": ("الْأَمِيرُ خَالِدٌ", "الْجِنِّيَّةُ لَيْلَى", "قَرْيَةُ النَّخِيلِ"),
@@ -139,10 +144,11 @@ def arabize_story(story: dict, age_band: str = "over8", genre: str = "animals") 
         "- غيّر الأسماء والشخصيات والأماكن والطابع إلى بيئة عربية أصيلة "
         "(مثل: سارة، يوسف، نورة، خالد، بغداد، دمشق، قرية النخيل...) ولا تُبقِ أسماء أجنبية.\n"
         "- اجعل الأجواء عربية خالصة مع عبرة واضحة.\n"
-        "- اكتب فصحى بسيطة مضبوطة لغوياً ونحوياً، بدون أي علامات تشكيل.\n"
+        "- اكتب فصحى بسيطة مضبوطة لغوياً ونحوياً، مع تشكيل كامل (تَشْكِيل) على كل الكلمات "
+        "في العنوان ونص القصة (الحركات: فتحة، ضمة، كسرة، سكون، تنوين، شدة).\n"
         "- لا تستخدم إيموجي ولا عناوين فرعية كثيرة.\n"
-        "- في السطر الأول فقط اكتب: العنوان: ثم عنوان عربي قصير بدون تشكيل.\n"
-        "- ثم سطر فارغ ثم نص القصة.\n"
+        "- في السطر الأول فقط اكتب: العنوان: ثم عنوان عربي قصير مع التشكيل الكامل.\n"
+        "- ثم سطر فارغ ثم نص القصة مشكّلاً بالكامل.\n"
         "- في آخر سطر: المصدر: ثم اسم المصدر كما هو.\n\n"
         f"العنوان الأصلي: {story['title_en']}\n"
         f"المصدر: {story['source']}\n\n"
@@ -164,47 +170,28 @@ def arabize_story(story: dict, age_band: str = "over8", genre: str = "animals") 
             body = rest.strip()
         if "المصدر:" not in body:
             body = body + f"\n\nالمصدر: {story['source']}"
-        title, body = strip_tashkeel(title), strip_tashkeel(body)
+        # Keep full tashkeel for .txt document + TTS
         return enforce_audio_budget(title, body, age_band)
     except Exception:
         log.exception("Gemini arabize failed; using local arabized fallback")
         t, b = _local_arabize(story, age_band, genre)
-        t, b = strip_tashkeel(t), strip_tashkeel(b)
         return enforce_audio_budget(t, b, age_band)
 
 
-def synthesize_pcm(narration: str, gender: str) -> tuple[bytes, int]:
-    voice = FEMALE_VOICE if gender == "female" else MALE_VOICE
+def _spoken_body(narration: str) -> str:
     spoken_body = narration
     if "المصدر:" in spoken_body:
         spoken_body = spoken_body.split("المصدر:")[0].strip()
     spoken_body = spoken_body.replace("العنوان:", "").strip()
-    spoken_body = strip_tashkeel(spoken_body)
-    if gender == "female":
-        persona = (
-            "You are a professional Arabic female audiobook narrator for children. "
-            "Warm, clear, polished, and highly engaging — like a premium bedtime/story podcast. "
-            "Natural voice only: no music, no sound effects, no stage noise. "
-            "Performance craft: build suspense before reveals, soft whisper in tender/mysterious beats, "
-            "bright lively energy in adventure, hush and whisper in mild spooky beats, gentle smile in kind moments, "
-            "measured pace with cinematic pauses, careful emphasis and slight elongation on emotional words, "
-            "never flat, never rushed, never shouty."
-        )
-    else:
-        persona = (
-            "You are a professional Arabic male audiobook narrator for children. "
-            "Warm, clear, polished, and highly engaging — like a premium bedtime/story podcast. "
-            "Natural voice only: no music, no sound effects, no stage noise. "
-            "Performance craft: build suspense before reveals, soft lower tone in tender/mysterious beats, "
-            "bright lively energy in adventure, hush and whisper in mild spooky beats, gentle smile in kind moments, "
-            "measured pace with cinematic pauses, careful emphasis and slight elongation on emotional words, "
-            "never flat, never rushed, never shouty."
-        )
-    spoken = (
-        persona
-        + "\nNarrate this grammatically correct Arabic children's story (plain text, no diacritics) with professional storytelling presence:\n\n"
-        + spoken_body
-    )
+    return spoken_body
+
+
+def synthesize_pcm(narration: str, voice: str | None = None) -> tuple[bytes, int]:
+    """Synthesize one PCM clip with Aoede + fixed Arabic kids-narrator instruction."""
+    voice_name = voice or TTS_VOICE
+    spoken_body = _spoken_body(narration)
+    # Keep tashkeel; fixed instruction every call for stable pitch/pace.
+    spoken = f"{TTS_INSTRUCTION}\n\n{spoken_body}"
 
     def _gen():
         return client().models.generate_content(
@@ -214,7 +201,7 @@ def synthesize_pcm(narration: str, gender: str) -> tuple[bytes, int]:
                 response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
                     )
                 ),
             ),
@@ -244,10 +231,7 @@ def synthesize_pcm(narration: str, gender: str) -> tuple[bytes, int]:
     return raw, rate
 
 
-def synthesize_long(narration: str, gender: str) -> tuple[bytes, int]:
-    body = narration
-    if "المصدر:" in body:
-        body = body.split("المصدر:")[0].strip()
+def _split_chunks(body: str, limit: int = 1400) -> list[str]:
     chunks: list[str] = []
     buf = ""
     for para in body.split("\n\n"):
@@ -255,25 +239,44 @@ def synthesize_long(narration: str, gender: str) -> tuple[bytes, int]:
         if not para:
             continue
         cand = (buf + "\n\n" + para).strip() if buf else para
-        if len(cand) <= 1400:
+        if len(cand) <= limit:
             buf = cand
         else:
             if buf:
                 chunks.append(buf)
-            if len(para) <= 1400:
+            if len(para) <= limit:
                 buf = para
             else:
-                for i in range(0, len(para), 1400):
-                    chunks.append(para[i : i + 1400])
+                for i in range(0, len(para), limit):
+                    chunks.append(para[i : i + limit])
                 buf = ""
     if buf:
         chunks.append(buf)
     if not chunks:
-        chunks = [body[:1400]]
+        chunks = [body[:limit] or body]
+    return chunks
+
+
+def synthesize_long(narration: str, voice: str | None = None) -> tuple[bytes, int]:
+    """Prefer one TTS call for the whole story; chunk only if needed.
+
+    Always uses Aoede + the same TTS_INSTRUCTION — never switch voice mid-story.
+    """
+    voice_name = voice or TTS_VOICE
+    body = _spoken_body(narration)
+
+    # Prefer a single call for stable pitch across the clip.
+    try:
+        log.info("tts single-call chars=%s voice=%s", len(body), voice_name)
+        return synthesize_pcm(body, voice_name)
+    except Exception as exc:
+        log.warning("tts single-call failed (%s); falling back to chunks with same voice", str(exc)[:160])
+
+    chunks = _split_chunks(body, limit=1400)
     pcm_all = b""
     rate = 24000
     for i, ch in enumerate(chunks):
-        log.info("tts chunk %s/%s chars=%s gender=%s", i + 1, len(chunks), len(ch), gender)
-        pcm, rate = synthesize_pcm(ch, gender)
+        log.info("tts chunk %s/%s chars=%s voice=%s", i + 1, len(chunks), len(ch), voice_name)
+        pcm, rate = synthesize_pcm(ch, voice_name)
         pcm_all += pcm
     return pcm_all, rate

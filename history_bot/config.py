@@ -14,7 +14,10 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "bot.sqlite"
 TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.6-flash")
 TTS_MODEL = os.environ.get("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
-FEMALE_VOICE = os.environ.get("GEMINI_FEMALE_VOICE", "Sulafat")
-MALE_VOICE = os.environ.get("GEMINI_MALE_VOICE", "Charon")
+# Fixed narrator: Gemini TTS Aoede only (female). Calm, stable kids-story narrator;
+# clear articulation; moderate fixed pace. Never Charon/Sulafat alternating.
+TTS_VOICE = "Aoede"
+FEMALE_VOICE = "Aoede"
+MALE_VOICE = "Aoede"
 SEND_HOURS = [(0, 0), (3, 0), (6, 0), (9, 0), (12, 0), (15, 0), (18, 0), (21, 0)]
 USER_AGENT = "KidsStoriesBot/1.0 (+personal telegram bedtime bot)"

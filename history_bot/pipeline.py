@@ -1,13 +1,14 @@
 from __future__ import annotations
 import asyncio
 import logging
+import re
 from io import BytesIO
 
 from telegram import Bot
 from telegram.error import Forbidden, TelegramError
 
 from . import store
-from .config import FEMALE_VOICE, MALE_VOICE, TELEGRAM_BOT_TOKEN
+from .config import TELEGRAM_BOT_TOKEN, TTS_VOICE
 from .gemini_client import arabize_story, synthesize_long
 from .stories import pick_unused_story
 from .tts import pcm_to_ogg
@@ -21,29 +22,15 @@ GENRE_AR = {
     "history": "تاريخية للأطفال",
 }
 
-def _chunk_text(text: str, limit: int = 3900) -> list[str]:
-    if len(text) <= limit:
-        return [text]
-    parts: list[str] = []
-    buf = ""
-    for para in text.split("\n"):
-        candidate = (buf + "\n" + para).strip() if buf else para
-        if len(candidate) <= limit:
-            buf = candidate
-        else:
-            if buf:
-                parts.append(buf)
-            if len(para) <= limit:
-                buf = para
-            else:
-                for i in range(0, len(para), limit):
-                    parts.append(para[i : i + limit])
-                buf = ""
-    if buf:
-        parts.append(buf)
-    return parts
 
-def _prepare_episode_sync() -> tuple[dict, str, str, bytes, str, dict] | None:
+def _safe_filename(title: str, story_id: str) -> str:
+    base = re.sub(r"[^\w\u0600-\u06FF\-]+", "_", title, flags=re.UNICODE).strip("_")
+    if not base:
+        base = story_id
+    return f"{base[:80]}.txt"
+
+
+def _prepare_episode_sync() -> tuple[dict, str, str, bytes, dict] | None:
     profile = store.peek_episode_profile()
     story = pick_unused_story(
         store.sent_ids(),
@@ -55,11 +42,12 @@ def _prepare_episode_sync() -> tuple[dict, str, str, bytes, str, dict] | None:
         return None
     # Reserve original English title BEFORE arabize/TTS so it never repeats
     store.reserve_story(story["id"], story.get("title_en", ""))
-    gender = store.next_voice_gender()
     title_ar, body_ar = arabize_story(story, age_band=profile["age_band"], genre=profile["genre"])
-    pcm, rate = synthesize_long(body_ar, gender)
+    # Always Aoede — never alternate voices mid-story or across episodes
+    pcm, rate = synthesize_long(body_ar, TTS_VOICE)
     ogg = pcm_to_ogg(pcm, rate)
-    return story, title_ar, body_ar, ogg, gender, profile
+    return story, title_ar, body_ar, ogg, profile
+
 
 async def send_one_to(user_ids: list[int], bot: Bot | None = None) -> str | None:
     try:
@@ -69,8 +57,7 @@ async def send_one_to(user_ids: list[int], bot: Bot | None = None) -> str | None
         return None
     if not prepared:
         return None
-    story, title_ar, body_ar, ogg, gender, profile = prepared
-    voice_name = FEMALE_VOICE if gender == "female" else MALE_VOICE
+    story, title_ar, body_ar, ogg, profile = prepared
     age_ar = "دون 7" if profile["age_band"] == "under7" else "8+"
 
     own = bot is None
@@ -79,19 +66,27 @@ async def send_one_to(user_ids: list[int], bot: Bot | None = None) -> str | None
         await bot.initialize()
 
     delivered = 0
-    header = (
-        f"📖 {title_ar}\n"
-        f"🏷️ النوع: {GENRE_AR.get(profile['genre'], profile['genre'])} | العمر: {age_ar}\n"
-        f"🎙️ الراوي: {'امرأة' if gender == 'female' else 'رجل'} ({voice_name})\n\n"
+    # Full story as .txt document (with tashkeel); short caption = title
+    doc_text = (
+        f"{title_ar}\n"
+        f"النوع: {GENRE_AR.get(profile['genre'], profile['genre'])} | العمر: {age_ar}\n"
+        f"الراوي: {TTS_VOICE} (أنثى — راوية قصص أطفال هادئة ومستقرة)\n\n"
+        f"{body_ar}\n"
     )
-    body_chunks = _chunk_text(header + body_ar)
-    caption = title_ar[:1000]
+    filename = _safe_filename(title_ar, story["id"])
+    caption = title_ar[:1024]
 
     try:
         for uid in user_ids:
             try:
-                for chunk in body_chunks:
-                    await bot.send_message(chat_id=uid, text=chunk)
+                doc_buf = BytesIO(doc_text.encode("utf-8"))
+                doc_buf.name = filename
+                await bot.send_document(
+                    chat_id=uid,
+                    document=doc_buf,
+                    filename=filename,
+                    caption=caption,
+                )
                 await bot.send_voice(
                     chat_id=uid,
                     voice=BytesIO(ogg),

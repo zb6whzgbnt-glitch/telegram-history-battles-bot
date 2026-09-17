@@ -4,7 +4,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from . import store
-from .config import TELEGRAM_BOT_TOKEN
+from .config import TELEGRAM_BOT_TOKEN, TTS_VOICE
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -16,10 +16,11 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 WELCOME = (
     "حياك الله.\n\n"
-    "أنا بوت قصص الأطفال: كل ثلاث ساعات قصة نصية مشوّقة بطابع عربي أصيل (مغامرة وتشويق خفيف).\n\n"
+    "أنا بوت قصص الأطفال: كل ثلاث ساعات قصة عربية مشوّقة بطابع أصيل (مغامرة وتشويق خفيف).\n\n"
     "التنويع: حيوانات، أساطير، قصص بشرية، وقصص تاريخية للأطفال.\n"
     "كل 4 قصص: 3 للأعمار 8+ (أطول قليلاً) وقصة لمن دون السابعة.\n"
-    "النص فصحى مضبوطة لغوياً ونحوياً (بدون تشكيل)، طول الصوت تقريباً 3–6 دقائق، ثم صوت يتناوب امرأة/رجل بدون موسيقى.\n"
+    f"النص فصحى مع تشكيل كامل، يُرسل كملف .txt ثم صوت الراوية {TTS_VOICE} "
+    "(أنثى — نبرة هادئة مستقرة، مخارج واضحة، سرعة معتدلة ثابتة)، طول الصوت تقريباً 3–6 دقائق، بدون موسيقى.\n"
     "جرّب: /now — للإيقاف: /stop"
 )
 
