@@ -12,7 +12,7 @@ TZ_NAME = os.environ.get("TZ", "Asia/Riyadh")
 DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "bot.sqlite"
-TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
+TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.6-flash")
 TTS_MODEL = os.environ.get("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
 FEMALE_VOICE = os.environ.get("GEMINI_FEMALE_VOICE", "Sulafat")
 MALE_VOICE = os.environ.get("GEMINI_MALE_VOICE", "Charon")

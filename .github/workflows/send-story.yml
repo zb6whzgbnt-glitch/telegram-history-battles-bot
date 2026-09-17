@@ -38,8 +38,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data
-          key: kids-bot-db-${{ github.run_id }}
+          key: kids-bot-db-v1-${{ github.run_id }}
           restore-keys: |
+            kids-bot-db-v1-
             kids-bot-db-
 
       - name: Send story
@@ -49,7 +50,7 @@ jobs:
           SUBSCRIBER_CHAT_IDS: ${{ secrets.SUBSCRIBER_CHAT_IDS }}
           TZ: Asia/Riyadh
           PYTHONUNBUFFERED: "1"
-          CMD_POLL_SECONDS: "30"
+          # Polling off by default (scripts/gha_send_story.py); set GHA_POLL_COMMANDS=1 to enable.
         run: |
           mkdir -p data
           PYTHONPATH=. python scripts/gha_send_story.py all

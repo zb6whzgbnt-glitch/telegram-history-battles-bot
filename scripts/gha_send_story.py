@@ -1,4 +1,8 @@
-"""GitHub Actions entry: process pending Telegram commands briefly, then send one story."""
+"""GitHub Actions entry: optionally process Telegram commands, then send one story.
+
+By default SKIP polling (avoids Conflict if Railway or another poller is briefly active).
+Set GHA_POLL_COMMANDS=1 to enable the short command drain.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -79,11 +83,22 @@ async def send_scheduled() -> str | None:
     return await send_one_to(ids)
 
 
+def _poll_enabled() -> bool:
+    return os.environ.get("GHA_POLL_COMMANDS", "").strip() in ("1", "true", "True", "yes", "YES")
+
+
 def main() -> None:
     mode = (sys.argv[1] if len(sys.argv) > 1 else "all").strip()
-    if mode in ("commands", "all"):
+    # Default: skip Telegram polling to avoid Conflict with any other getUpdates client.
+    # Opt-in with GHA_POLL_COMMANDS=1 (or mode=commands).
+    do_poll = mode == "commands" or (mode == "all" and _poll_enabled())
+    do_send = mode in ("send", "all")
+    if do_poll:
+        log.info("polling Telegram commands for %.0fs", float(os.environ.get("CMD_POLL_SECONDS", "25")))
         asyncio.run(process_commands(timeout_s=float(os.environ.get("CMD_POLL_SECONDS", "25"))))
-    if mode in ("send", "all"):
+    elif mode == "all":
+        log.info("skip Telegram polling (set GHA_POLL_COMMANDS=1 to enable)")
+    if do_send:
         title = asyncio.run(send_scheduled())
         print(title or "nothing sent")
 
