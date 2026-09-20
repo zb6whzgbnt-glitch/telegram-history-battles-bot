@@ -134,7 +134,7 @@ def _local_arabize(story: dict, age_band: str, genre: str) -> tuple[str, str]:
 def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "animals") -> tuple[str, str]:
     """Gemini-ONLY final step: dramatic Arabic kids retelling WITH full tashkeel.
 
-    Prefers an Arabic draft from DeepSeek/Cohere (story['arabic_draft']) when present;
+    Prefers an Arabic draft from Cohere (story['arabic_draft']) when present;
     otherwise falls back to source-language text (legacy path).
     """
     age_line = (

@@ -16,9 +16,6 @@ GEMINI_STORY_API_KEY = os.environ.get("GEMINI_STORY_API_KEY", "").strip() or GEM
 GEMINI_TASHKEEL_API_KEY = os.environ.get("GEMINI_TASHKEEL_API_KEY", "").strip() or GEMINI_API_KEY
 
 # Pre-Gemini models (extract / rewrite / translate). Soft-fail if missing/unpaid.
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip()
 COHERE_API_KEY = os.environ.get("COHERE_API_KEY", "").strip()
 COHERE_MODEL = os.environ.get("COHERE_MODEL", "command-a-03-2025").strip()
 

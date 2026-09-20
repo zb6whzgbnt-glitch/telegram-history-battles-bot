@@ -1,7 +1,7 @@
-"""Multi-model story prep: DeepSeek + Cohere extract/clean/translate; Gemini is NOT used here.
+"""Multi-model story prep: Cohere (+ optional Cloudflare Llama) extract/clean/translate.
 
-Gemini's only role remains final kids retelling with full tashkeel + Aoede TTS
-(see gemini_client.finalize_kids_story / synthesize_long).
+Gemini is NOT used here. Gemini's only role remains final kids retelling with
+full tashkeel + Aoede TTS (see gemini_client.finalize_kids_story / synthesize_long).
 """
 from __future__ import annotations
 
@@ -15,9 +15,6 @@ import requests
 from .config import (
     COHERE_API_KEY,
     COHERE_MODEL,
-    DEEPSEEK_API_KEY,
-    DEEPSEEK_BASE_URL,
-    DEEPSEEK_MODEL,
 )
 
 log = logging.getLogger("history_bot.ai_pipeline")
@@ -41,35 +38,6 @@ def _clip(text: str, n: int = 12000) -> str:
     if len(text) <= n:
         return text
     return text[:n] + "\n…"
-
-
-def deepseek_chat(prompt: str, system: str = "", max_tokens: int = 2500) -> str | None:
-    if not DEEPSEEK_API_KEY:
-        log.info("model=deepseek skip: no DEEPSEEK_API_KEY")
-        return None
-    try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        resp = client.chat.completions.create(
-            model=DEEPSEEK_MODEL,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=0.4,
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        if text:
-            log.info("model=deepseek/%s ok chars=%s", DEEPSEEK_MODEL, len(text))
-            return text
-        log.warning("model=deepseek empty response")
-        return None
-    except Exception as exc:
-        log.warning("model=deepseek fail: %s", str(exc)[:200])
-        return None
 
 
 def cohere_chat(prompt: str, system: str = "", max_tokens: int = 2500) -> str | None:
@@ -179,7 +147,7 @@ def _parse_title_body(text: str, fallback_title: str) -> tuple[str, str]:
 
 
 def extract_clean_story(story: dict) -> dict:
-    """AI-clean scraped title+body (DeepSeek primary, Cohere fallback)."""
+    """AI-clean scraped title+body (Cohere primary, optional Cloudflare Llama)."""
     title = story.get("title_en") or ""
     body = story.get("text_en") or ""
     system = (
@@ -193,16 +161,13 @@ def extract_clean_story(story: dict) -> dict:
         f"Raw title:\n{title}\n\nRaw body:\n{_clip(body)}\n"
     )
 
-    def deepseek():
-        return deepseek_chat(prompt, system=system)
-
     def cohere():
         return cohere_chat(prompt, system=system)
 
     def cloudflare_llama():
         return cloudflare_llama_chat(prompt, system=system)
 
-    text, used = _first_ok([deepseek, cohere, cloudflare_llama])
+    text, used = _first_ok([cohere, cloudflare_llama])
     out = dict(story)
     if not text:
         log.info("extract: BeautifulSoup fallback (no AI clean)")
@@ -236,10 +201,10 @@ def rewrite_source_quality(story: dict) -> dict:
     def cohere():
         return cohere_chat(prompt, system=system, max_tokens=3000)
 
-    def deepseek():
-        return deepseek_chat(prompt, system=system, max_tokens=3000)
+    def cloudflare_llama():
+        return cloudflare_llama_chat(prompt, system=system, max_tokens=3000)
 
-    text, used = _first_ok([cohere, deepseek])
+    text, used = _first_ok([cohere, cloudflare_llama])
     out = dict(story)
     if not text:
         out["rewrite_model"] = "skip"
@@ -274,16 +239,13 @@ def translate_arabic_draft(story: dict, age_band: str = "over8", genre: str = "l
         f"Story text:\n{_clip(body)}\n"
     )
 
-    def deepseek():
-        return deepseek_chat(prompt, system=system, max_tokens=2800)
-
     def cohere():
         return cohere_chat(prompt, system=system, max_tokens=2800)
 
     def cloudflare_llama():
         return cloudflare_llama_chat(prompt, system=system)
 
-    text, used = _first_ok([deepseek, cohere, cloudflare_llama])
+    text, used = _first_ok([cohere, cloudflare_llama])
     out = dict(story)
     if not text:
         out["translate_model"] = "none"
@@ -316,10 +278,9 @@ def translate_arabic_draft(story: dict, age_band: str = "over8", genre: str = "l
 def prepare_story_for_gemini(story: dict, age_band: str = "over8", genre: str = "legend") -> dict:
     """Full pre-Gemini chain with soft fallbacks. Logs which models ran."""
     log.info(
-        "ai_pipeline start source=%s title=%s deepseek=%s cohere=%s cf_llama=%s",
+        "ai_pipeline start source=%s title=%s cohere=%s cf_llama=%s",
         story.get("source"),
         (story.get("title_en") or "")[:60],
-        bool(DEEPSEEK_API_KEY),
         bool(COHERE_API_KEY),
         bool(CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID),
     )
