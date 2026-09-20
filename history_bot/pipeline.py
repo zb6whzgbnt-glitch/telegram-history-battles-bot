@@ -9,7 +9,7 @@ from telegram.error import Forbidden, TelegramError
 
 from . import store
 from .config import TELEGRAM_BOT_TOKEN, TTS_VOICE
-from .gemini_client import arabize_story, synthesize_long
+from .gemini_client import arabize_story, synthesize_long, _disambiguate_hero_title
 from .stories import pick_unused_story
 from .tts import pcm_to_ogg
 
@@ -43,8 +43,29 @@ def _prepare_episode_sync() -> tuple[dict, str, str, bytes, dict] | None:
     # Reserve original English title BEFORE arabize/TTS so it never repeats
     store.reserve_story(story["id"], story.get("title_en", ""))
     log.info("prepare episode source=%s title=%s", story.get("source"), (story.get("title_en") or "")[:80])
-    title_ar, body_ar = arabize_story(story, age_band=profile["age_band"], genre=profile["genre"])
-    log.info("episode ready title_ar_chars=%s body_words~%s voice=%s", len(title_ar), len(body_ar.split()), TTS_VOICE)
+    used_heroes = store.used_hero_keys(limit=400)
+    title_ar, body_ar = arabize_story(
+        story,
+        age_band=profile["age_band"],
+        genre=profile["genre"],
+        used_heroes=used_heroes,
+    )
+    # Reserve Arabic hero/title name so concurrent runs cannot collide
+    if not store.reserve_hero(title_ar, story["id"]):
+        blocked = store.used_hero_normalized_keys()
+        for _ in range(6):
+            blocked = blocked | {store.normalize_hero_name(title_ar)}
+            title_ar = _disambiguate_hero_title(title_ar, body_ar, blocked)
+            if store.reserve_hero(title_ar, story["id"]):
+                break
+        else:
+            log.error("hero reserve failed after disambiguation title=%s", title_ar[:60])
+    log.info(
+        "episode ready hero_title=%s body_words~%s voice=%s",
+        title_ar[:80],
+        len(body_ar.split()),
+        TTS_VOICE,
+    )
     # Always Aoede — never alternate voices mid-story or across episodes
     pcm, rate = synthesize_long(body_ar, TTS_VOICE)
     ogg = pcm_to_ogg(pcm, rate)
@@ -105,6 +126,7 @@ async def send_one_to(user_ids: list[int], bot: Bot | None = None) -> str | None
                 log.warning("send failed user=%s err=%s", uid, exc)
         if delivered:
             store.mark_sent(story["id"], title_en=story.get("title_en", ""))
+            store.mark_hero_sent(title_ar, story["id"])
             store.advance_episode_profile()
             return title_ar
         return None

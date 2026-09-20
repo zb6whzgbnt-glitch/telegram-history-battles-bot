@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -52,6 +53,13 @@ def init() -> None:
         CREATE TABLE IF NOT EXISTS sent_story_titles (
             title_key TEXT PRIMARY KEY,
             title_en TEXT NOT NULL,
+            story_id TEXT,
+            reserved_at TEXT NOT NULL,
+            sent_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS sent_hero_names (
+            normalized_key TEXT PRIMARY KEY,
+            display_ar TEXT NOT NULL,
             story_id TEXT,
             reserved_at TEXT NOT NULL,
             sent_at TEXT
@@ -191,3 +199,95 @@ def advance_episode_profile() -> None:
         genre_i = int(_get_meta(conn, "genre_index", "0")) + 1
         _set_meta(conn, "story_slot", str(slot))
         _set_meta(conn, "genre_index", str(genre_i))
+
+
+# Arabic hero/title name dedupe (titles = hero/heroine names)
+_TASHKEEL_RE = re.compile(r"[\u064B-\u065F\u0670]")
+_WS_RE = re.compile(r"\s+")
+
+
+def normalize_hero_name(name: str) -> str:
+    """Normalize Arabic hero/title for dedupe: strip tashkeel, collapse spaces, trim."""
+    t = (name or "").strip()
+    t = _TASHKEEL_RE.sub("", t)
+    # Common alef/ya/ta-marbuta variants → stable key
+    t = (
+        t.replace("أ", "ا")
+        .replace("إ", "ا")
+        .replace("آ", "ا")
+        .replace("ى", "ي")
+        .replace("ة", "ه")
+    )
+    t = _WS_RE.sub(" ", t).strip()
+    return t.casefold()
+
+
+def used_hero_keys(limit: int = 400) -> list[str]:
+    """Recent used hero display names (for Gemini blocklist), newest first."""
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT display_ar FROM sent_hero_names
+            ORDER BY COALESCE(sent_at, reserved_at) DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+    return [r["display_ar"] for r in rows]
+
+
+def used_hero_normalized_keys() -> set[str]:
+    with db() as conn:
+        rows = conn.execute("SELECT normalized_key FROM sent_hero_names").fetchall()
+    return {r["normalized_key"] for r in rows}
+
+
+def is_hero_used(name: str) -> bool:
+    key = normalize_hero_name(name)
+    if not key:
+        return False
+    with db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sent_hero_names WHERE normalized_key=?",
+            (key,),
+        ).fetchone()
+    return row is not None
+
+
+def reserve_hero(display_ar: str, story_id: str | None = None) -> bool:
+    """Reserve hero title name. Returns True if newly reserved, False if already taken."""
+    key = normalize_hero_name(display_ar)
+    if not key:
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO sent_hero_names(normalized_key, display_ar, story_id, reserved_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (key, display_ar.strip(), story_id, now),
+        )
+        return cur.rowcount > 0
+
+
+def mark_hero_sent(display_ar: str, story_id: str | None = None) -> None:
+    """Record hero name as sent (upsert)."""
+    key = normalize_hero_name(display_ar)
+    if not key:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    display = (display_ar or "").strip() or key
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO sent_hero_names(normalized_key, display_ar, story_id, reserved_at, sent_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(normalized_key) DO UPDATE SET
+                display_ar=excluded.display_ar,
+                story_id=COALESCE(excluded.story_id, sent_hero_names.story_id),
+                sent_at=excluded.sent_at
+            """,
+            (key, display, story_id, now, now),
+        )
+

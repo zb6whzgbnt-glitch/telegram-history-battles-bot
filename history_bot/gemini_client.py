@@ -185,8 +185,9 @@ def _local_arabize(story: dict, age_band: str, genre: str) -> tuple[str, str]:
         "history": ("الصَّبِيُّ عُمَرُ", "بَغْدَادُ", "الْعَالِمُ الْحَسَنُ"),
     }
     a, b, c = names.get(genre, names["human"])
+    # Title = hero/heroine name only (Arabic)
+    title = a
     if age_band == "under7":
-        title = f"حِكَايَةُ {a}"
         body = (
             f"فِي قَرْيَةٍ عَرَبِيَّةٍ جَمِيلَةٍ، عَاشَتْ {a} مَعَ {b}. "
             f"ذَاتَ يَوْمٍ ضَاعَتْ طَرِيقُهُمَا، فَسَاعَدَتْهُمَا {c} بِقَلْبٍ طَيِّبٍ. "
@@ -195,7 +196,6 @@ def _local_arabize(story: dict, age_band: str, genre: str) -> tuple[str, str]:
             f"المصدر: {story.get('source', 'محلي')}"
         )
     else:
-        title = f"رِحْلَةُ {a} إِلَى {c}"
         body = (
             f"فِي زَمَانٍ قَدِيمٍ، انْطَلَقَتْ {a} مَعَ {b} فِي رِحْلَةٍ طَوِيلَةٍ عَبْرَ الصَّحْرَاءِ وَالْوَاحَاتِ. "
             f"وَاجَهَا عَطَشاً وَرِيحاً شَدِيدَةً، لَكِنَّهُمَا تَعَاوَنَا وَلَمْ يَسْتَسْلِمَا. "
@@ -207,14 +207,13 @@ def _local_arabize(story: dict, age_band: str, genre: str) -> tuple[str, str]:
     return title, body
 
 
-def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "animals") -> tuple[str, str]:
+def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "animals", used_heroes: list[str] | None = None, extra_instruction: str = "") -> tuple[str, str]:
     """Gemini final step: dramatic Arabic kids retelling WITH full tashkeel.
 
-    Prefers an Arabic draft from prep (story['arabic_draft'], via Talking Mini /
-    main Gemini / Cohere / …) when present; otherwise falls back to source text.
-    Finalize keys (until one succeeds): gemini-main → gemini-talking-mini → gemini-story.
-    Models: TEXT_MODEL → gemini-flash-latest → gemini-3.6-flash.
-    TTS (Aoede) prefers GEMINI_API_KEY; talking-mini only if main fails.
+    Title MUST be the main hero/heroine Arabic name only.
+    used_heroes: blocklist of recently used hero names (do not reuse as titles).
+    Prefers an Arabic draft from prep when present; else source text.
+    Finalize keys: gemini-main → gemini-talking-mini → gemini-story.
     """
     age_line = (
         "الفئة: دون السابعة — لغة بسيطة، جمل قصيرة، مغامرة خفيفة مع غموض لطيف يحفّز الانتباه، بدون عنف أو رعب مرعب."
@@ -271,9 +270,32 @@ def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "anim
         + "- اكتب فصحى بسيطة مضبوطة لغوياً ونحوياً، مع تشكيل كامل (تَشْكِيل) على كل الكلمات "
         "في العنوان ونص القصة (الحركات: فتحة، ضمة، كسرة، سكون، تنوين، شدة).\n"
         + "- لا تستخدم إيموجي ولا عناوين فرعية كثيرة.\n"
-        + "- في السطر الأول فقط اكتب: العنوان: ثم عنوان عربي قصير مع التشكيل الكامل.\n"
+        + "- مهم جداً: العنوان = اسم البطل أو البطلة فقط بالعربية (مثل: سارة، يوسف، نورة، خالد) "
+        "أو صيغة قصيرة باسم البطل مثل «يوسف والصياد» إذا لزم — فضّل اسماً شخصياً واضحاً معرّباً.\n"
+        + "- لا تجعل العنوان وصفاً عاماً (مثل حكاية القرية / رحلة الصحراء) — يجب أن يكون اسم البطل/البطلة.\n"
+        + "- في السطر الأول فقط اكتب: العنوان: ثم اسم البطل/البطلة مع التشكيل الكامل.\n"
         + "- ثم سطر فارغ ثم نص القصة مشكّلاً بالكامل.\n"
-        + "- في آخر سطر: المصدر: ثم اسم المصدر كما هو.\n\n"
+        + "- في آخر سطر: المصدر: ثم اسم المصدر كما هو.\n"
+    )
+    heroes = [h.strip() for h in (used_heroes or []) if h and str(h).strip()]
+    if heroes:
+        # Pass display names; strip tashkeel for compactness in blocklist
+        shown = []
+        for h in heroes[:400]:
+            clean = strip_tashkeel(h).strip()
+            if clean and clean not in shown:
+                shown.append(clean)
+        if shown:
+            prompt += (
+                "- لا تستخدم هذه الأسماء للعناوين/الأبطال (مستخدمة سابقاً): "
+                + "، ".join(shown)
+                + ".\n"
+                + "- اختر اسماً عربياً جديداً وغير مكرر للبطل/البطلة.\n"
+            )
+    if extra_instruction:
+        prompt += f"- {extra_instruction.strip()}\n"
+    prompt += (
+        "\n"
         + f"المصدر الأصلي للموقع: {story.get('source', '')}\n\n"
         + source_block
     )
@@ -342,15 +364,84 @@ def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "anim
     return enforce_audio_budget(t, b, age_band)
 
 
-def arabize_story(story: dict, age_band: str = "over8", genre: str = "animals") -> tuple[str, str]:
-    """Backward-compatible entry: runs multi-model prep then Gemini finalize."""
+def _disambiguate_hero_title(title: str, body: str, blocked_keys: set[str]) -> str:
+    """Append a distinguishing plot/place word so the hero title key is unique."""
+    from .store import normalize_hero_name
+
+    base = (title or "").strip() or "بطل"
+    # Prefer Arabic tokens that look like places/roles (length >= 3 letters)
+    candidates: list[str] = []
+    for w in re.findall(r"[\u0600-\u06FF]{3,}", body or ""):
+        clean = strip_tashkeel(w)
+        stop = {
+            "المصدر", "كان", "كانت", "قالت", "قال", "هذه", "هذا", "هؤلاء",
+            "التي", "الذي", "الذين", "على", "إلى", "الي", "من", "في", "عن",
+            "مع", "ثم", "بعد", "قبل", "كل", "بعض", "غير", "بين", "حتى",
+            "لم", "لن", "ما", "لا", "إن", "ان", "أن", "او", "أو", "إذا",
+            "ذلك", "تلك", "هناك", "هنا", "جدا", "ايضا", "أيضا", "وقد", "فقد",
+            "وهو", "وهي", "فهم", "فهي", "انهم", "انها", "قصة", "الحكاية",
+        }
+        if clean in stop or len(clean) < 3:
+            continue
+        if clean and clean not in candidates:
+            candidates.append(clean)
+        if len(candidates) >= 40:
+            break
+    # Prefer place-ish tokens later in shortlist; try several suffixes
+    for suffix in candidates:
+        cand = f"{strip_tashkeel(base).split()[0] if base else 'بطل'} و{suffix}"
+        # Keep some tashkeel-free short form; if base had tashkeel, keep base + suffix
+        cand_display = f"{base} و{suffix}"
+        if normalize_hero_name(cand_display) not in blocked_keys:
+            return cand_display
+    # Last resort: numeric-ish distinguisher from body length
+    n = (len(body or "") % 97) + 2
+    return f"{base} والقصة{n}"
+
+
+def arabize_story(
+    story: dict,
+    age_band: str = "over8",
+    genre: str = "animals",
+    used_heroes: list[str] | None = None,
+) -> tuple[str, str]:
+    """Prep + Gemini finalize; title is hero name; avoid used hero names."""
+    from .store import normalize_hero_name
+
     try:
         from .ai_pipeline import prepare_story_for_gemini
 
         story = prepare_story_for_gemini(story, age_band=age_band, genre=genre)
     except Exception:
         log.exception("ai_pipeline prepare failed; continuing with raw story to Gemini")
-    return finalize_kids_story(story, age_band=age_band, genre=genre)
+
+    blocked = {normalize_hero_name(h) for h in (used_heroes or []) if h}
+    title, body = finalize_kids_story(
+        story, age_band=age_band, genre=genre, used_heroes=used_heroes
+    )
+    key = normalize_hero_name(title)
+    if key and key not in blocked:
+        return title, body
+
+    log.warning("hero title collision or empty (%s); retrying finalize once", title[:40])
+    title2, body2 = finalize_kids_story(
+        story,
+        age_band=age_band,
+        genre=genre,
+        used_heroes=used_heroes,
+        extra_instruction=(
+            "يجب اختيار اسم بطل/بطلة عربي جديد تماماً وغير موجود في قائمة الأسماء المستخدمة. "
+            "لا تكرر الاسم السابق. العنوان = الاسم فقط."
+        ),
+    )
+    key2 = normalize_hero_name(title2)
+    if key2 and key2 not in blocked:
+        return title2, body2
+
+    # Still colliding: append distinguishing word from plot
+    fixed = _disambiguate_hero_title(title2 or title, body2 or body, blocked)
+    log.warning("hero title still colliding; disambiguated to %s", fixed[:60])
+    return fixed, (body2 or body)
 
 
 def _spoken_body(narration: str) -> str:
