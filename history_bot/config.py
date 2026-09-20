@@ -14,8 +14,11 @@ GEMINI_API_KEY = (
 # Optional dedicated keys (fall back to GEMINI_API_KEY).
 GEMINI_STORY_API_KEY = os.environ.get("GEMINI_STORY_API_KEY", "").strip() or GEMINI_API_KEY
 GEMINI_TASHKEEL_API_KEY = os.environ.get("GEMINI_TASHKEEL_API_KEY", "").strip() or GEMINI_API_KEY
+# Second Gemini key for prep (extract / rewrite / Arabic draft). Soft-fail on 403.
+TALKING_MINI_API_KEY = os.environ.get("TALKING_MINI_API_KEY", "").strip()
 
-# Pre-Gemini models (extract / rewrite / translate). Soft-fail if missing/unpaid.
+# Prep models (extract / rewrite / translate / story-adjust). Soft-fail if missing/denied.
+# Dual Gemini: Talking Mini + main/story, then Cohere / Cloudflare / BS.
 COHERE_API_KEY = os.environ.get("COHERE_API_KEY", "").strip()
 COHERE_MODEL = os.environ.get("COHERE_MODEL", "command-a-03-2025").strip()
 

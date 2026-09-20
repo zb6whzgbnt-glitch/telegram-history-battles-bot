@@ -132,10 +132,11 @@ def _local_arabize(story: dict, age_band: str, genre: str) -> tuple[str, str]:
 
 
 def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "animals") -> tuple[str, str]:
-    """Gemini-ONLY final step: dramatic Arabic kids retelling WITH full tashkeel.
+    """Gemini final step: dramatic Arabic kids retelling WITH full tashkeel.
 
-    Prefers an Arabic draft from Cohere (story['arabic_draft']) when present;
-    otherwise falls back to source-language text (legacy path).
+    Prefers an Arabic draft from prep (story['arabic_draft'], via Talking Mini /
+    main Gemini / Cohere / …) when present; otherwise falls back to source text.
+    TTS (Aoede) stays on GEMINI_API_KEY via client().
     """
     age_line = (
         "الفئة: دون السابعة — لغة بسيطة، جمل قصيرة، مغامرة خفيفة مع غموض لطيف يحفّز الانتباه، بدون عنف أو رعب مرعب."

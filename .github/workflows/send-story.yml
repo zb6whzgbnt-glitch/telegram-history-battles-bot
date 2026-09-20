@@ -49,6 +49,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_STORY_API_KEY: ${{ secrets.GEMINI_STORY_API_KEY }}
           GEMINI_TASHKEEL_API_KEY: ${{ secrets.GEMINI_TASHKEEL_API_KEY }}
+          TALKING_MINI_API_KEY: ${{ secrets.TALKING_MINI_API_KEY }}
           COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
