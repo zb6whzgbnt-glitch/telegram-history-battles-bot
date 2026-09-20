@@ -42,7 +42,9 @@ def _prepare_episode_sync() -> tuple[dict, str, str, bytes, dict] | None:
         return None
     # Reserve original English title BEFORE arabize/TTS so it never repeats
     store.reserve_story(story["id"], story.get("title_en", ""))
+    log.info("prepare episode source=%s title=%s", story.get("source"), (story.get("title_en") or "")[:80])
     title_ar, body_ar = arabize_story(story, age_band=profile["age_band"], genre=profile["genre"])
+    log.info("episode ready title_ar_chars=%s body_words~%s voice=%s", len(title_ar), len(body_ar.split()), TTS_VOICE)
     # Always Aoede — never alternate voices mid-story or across episodes
     pcm, rate = synthesize_long(body_ar, TTS_VOICE)
     ogg = pcm_to_ogg(pcm, rate)

@@ -115,7 +115,12 @@ def _local_arabize(story: dict, age_band: str, genre: str) -> tuple[str, str]:
     return title, body
 
 
-def arabize_story(story: dict, age_band: str = "over8", genre: str = "animals") -> tuple[str, str]:
+def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "animals") -> tuple[str, str]:
+    """Gemini-ONLY final step: dramatic Arabic kids retelling WITH full tashkeel.
+
+    Prefers an Arabic draft from DeepSeek/Cohere (story['arabic_draft']) when present;
+    otherwise falls back to source-language text (legacy path).
+    """
     age_line = (
         "الفئة: دون السابعة — لغة بسيطة، جمل قصيرة، مغامرة خفيفة مع غموض لطيف يحفّز الانتباه، بدون عنف أو رعب مرعب."
         if age_band == "under7"
@@ -133,26 +138,49 @@ def arabize_story(story: dict, age_band: str = "over8", genre: str = "animals") 
         if age_band == "under7"
         else "اجعل النص حوالي 320–580 كلمة عربية بحيث يكون الإلقاء الصوتي بين 3 و6 دقائق (فضّل 4–6)."
     )
+    draft = (story.get("arabic_draft") or "").strip()
+    draft_title = (story.get("arabic_draft_title") or "").strip()
+    if draft:
+        log.info("gemini finalize from arabic_draft (pre models: extract=%s rewrite=%s translate=%s)",
+                 story.get("extract_model"), story.get("rewrite_model"), story.get("translate_model"))
+        source_block = (
+            f"مسودة عربية جاهزة (بدون تشكيل كامل بالضرورة) — أعد صياغتها دراميًا مع تشكيل كامل:\n"
+            f"عنوان المسودة: {draft_title or story.get('title_en', '')}\n\n"
+            f"{draft}\n"
+        )
+        transform_line = (
+            "أنت كاتب قصص أطفال عربي محترف. حوّل المسودة العربية التالية إلى رواية نهائية "
+            "فصحى مشكّلة بالكامل (تَشْكِيل على كل كلمة)، بأسلوب مغامرة وتشويق خفيف.\n"
+        )
+    else:
+        log.info("gemini finalize from source text (no arabic_draft; classic arabize)")
+        source_block = (
+            f"العنوان الأصلي: {story['title_en']}\n"
+            f"المصدر: {story['source']}\n\n"
+            f"النص:\n{story['text_en']}\n"
+        )
+        transform_line = (
+            "أنت كاتب قصص أطفال عربي محترف متخصص في المغامرات والتشويق.\n"
+            "حوّل النص الأصلي التالي (أي لغة) إلى قصة عربية فصحى بسيطة عالية الجودة تناسب الأطفال، مع تعريب كامل:\n"
+        )
     prompt = (
-        "أنت كاتب قصص أطفال عربي محترف متخصص في المغامرات والتشويق.\n"
-        "حوّل النص الأصلي التالي (قد يكون بالإنجليزية أو الفرنسية أو الروسية أو الإسبانية أو غيرها) إلى قصة عربية فصحى بسيطة عالية الجودة تناسب الأطفال، مع تعريب كامل:\n"
-        f"- {age_line}\n"
-        f"- {genre_line}\n"
-        f"- {length_line}\n"
-        "- اكتب بأسلوب مشوّق: بداية جذابة، تصاعد توتر، لحظة ذروة، ثم نهاية مطمئنة.\n"
-        "- أدخل عنصر مغامرة ولغز/غموض خفيف يحفّز الانتباه (باب يُطرق ليلاً، ظل في الممر، صوت غريب، خريطة ناقصة...) مع بقاء القصة آمنة للأطفال.\n"
-        "- غيّر الأسماء والشخصيات والأماكن والطابع إلى بيئة عربية أصيلة "
+        transform_line
+        + f"- {age_line}\n"
+        + f"- {genre_line}\n"
+        + f"- {length_line}\n"
+        + "- اكتب بأسلوب مشوّق: بداية جذابة، تصاعد توتر، لحظة ذروة، ثم نهاية مطمئنة.\n"
+        + "- أدخل عنصر مغامرة ولغز/غموض خفيف يحفّز الانتباه (باب يُطرق ليلاً، ظل في الممر، صوت غريب، خريطة ناقصة...) مع بقاء القصة آمنة للأطفال.\n"
+        + "- غيّر الأسماء والشخصيات والأماكن والطابع إلى بيئة عربية أصيلة "
         "(مثل: سارة، يوسف، نورة، خالد، بغداد، دمشق، قرية النخيل...) ولا تُبقِ أسماء أجنبية.\n"
-        "- اجعل الأجواء عربية خالصة مع عبرة واضحة.\n"
-        "- اكتب فصحى بسيطة مضبوطة لغوياً ونحوياً، مع تشكيل كامل (تَشْكِيل) على كل الكلمات "
+        + "- اجعل الأجواء عربية خالصة مع عبرة واضحة.\n"
+        + "- اكتب فصحى بسيطة مضبوطة لغوياً ونحوياً، مع تشكيل كامل (تَشْكِيل) على كل الكلمات "
         "في العنوان ونص القصة (الحركات: فتحة، ضمة، كسرة، سكون، تنوين، شدة).\n"
-        "- لا تستخدم إيموجي ولا عناوين فرعية كثيرة.\n"
-        "- في السطر الأول فقط اكتب: العنوان: ثم عنوان عربي قصير مع التشكيل الكامل.\n"
-        "- ثم سطر فارغ ثم نص القصة مشكّلاً بالكامل.\n"
-        "- في آخر سطر: المصدر: ثم اسم المصدر كما هو.\n\n"
-        f"العنوان الأصلي: {story['title_en']}\n"
-        f"المصدر: {story['source']}\n\n"
-        f"النص:\n{story['text_en']}\n"
+        + "- لا تستخدم إيموجي ولا عناوين فرعية كثيرة.\n"
+        + "- في السطر الأول فقط اكتب: العنوان: ثم عنوان عربي قصير مع التشكيل الكامل.\n"
+        + "- ثم سطر فارغ ثم نص القصة مشكّلاً بالكامل.\n"
+        + "- في آخر سطر: المصدر: ثم اسم المصدر كما هو.\n\n"
+        + f"المصدر الأصلي للموقع: {story.get('source', '')}\n\n"
+        + source_block
     )
     try:
         def _gen():
@@ -161,8 +189,8 @@ def arabize_story(story: dict, age_band: str = "over8", genre: str = "animals") 
         resp = _call_with_retry(_gen)
         text = (resp.text or "").strip()
         if not text:
-            raise RuntimeError("empty arabized story")
-        title = story["title_en"]
+            raise RuntimeError("empty finalized story")
+        title = draft_title or story.get("title_en", "")
         body = text
         if text.startswith("العنوان:") or "العنوان:" in text.split("\n", 1)[0]:
             first, _, rest = text.partition("\n")
@@ -170,12 +198,23 @@ def arabize_story(story: dict, age_band: str = "over8", genre: str = "animals") 
             body = rest.strip()
         if "المصدر:" not in body:
             body = body + f"\n\nالمصدر: {story['source']}"
-        # Keep full tashkeel for .txt document + TTS
+        log.info("model=gemini/%s finalize ok title_chars=%s body_words~%s", TEXT_MODEL, len(title), len(body.split()))
         return enforce_audio_budget(title, body, age_band)
     except Exception:
-        log.exception("Gemini arabize failed; using local arabized fallback")
+        log.exception("Gemini finalize failed; using local arabized fallback")
         t, b = _local_arabize(story, age_band, genre)
         return enforce_audio_budget(t, b, age_band)
+
+
+def arabize_story(story: dict, age_band: str = "over8", genre: str = "animals") -> tuple[str, str]:
+    """Backward-compatible entry: runs multi-model prep then Gemini finalize."""
+    try:
+        from .ai_pipeline import prepare_story_for_gemini
+
+        story = prepare_story_for_gemini(story, age_band=age_band, genre=genre)
+    except Exception:
+        log.exception("ai_pipeline prepare failed; continuing with raw story to Gemini")
+    return finalize_kids_story(story, age_band=age_band, genre=genre)
 
 
 def _spoken_body(narration: str) -> str:
