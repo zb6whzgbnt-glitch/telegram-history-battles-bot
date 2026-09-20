@@ -6,7 +6,7 @@ import time
 from google import genai
 from google.genai import types
 
-from .config import GEMINI_API_KEY, TEXT_MODEL, TTS_MODEL, TTS_VOICE
+from .config import GEMINI_API_KEY, GEMINI_STORY_API_KEY, TEXT_MODEL, TTS_MODEL, TTS_VOICE
 
 log = logging.getLogger("history_bot.gemini")
 _client = None
@@ -59,12 +59,28 @@ def enforce_audio_budget(title: str, body: str, age_band: str) -> tuple[str, str
 
 
 def client() -> genai.Client:
+    """Client for Gemini TTS (and general). Prefer main GEMINI_API_KEY."""
     global _client
     if _client is None:
-        if not GEMINI_API_KEY:
+        key = GEMINI_API_KEY or GEMINI_STORY_API_KEY
+        if not key:
             raise RuntimeError("GEMINI_API_KEY missing")
-        _client = genai.Client(api_key=GEMINI_API_KEY)
+        _client = genai.Client(api_key=key)
     return _client
+
+
+_story_client = None
+
+
+def story_client() -> genai.Client:
+    """Prefer GEMINI_STORY_API_KEY for final kids retelling text."""
+    global _story_client
+    if _story_client is None:
+        key = GEMINI_STORY_API_KEY or GEMINI_API_KEY
+        if not key:
+            raise RuntimeError("GEMINI_API_KEY missing")
+        _story_client = genai.Client(api_key=key)
+    return _story_client
 
 
 def _call_with_retry(fn, tries: int = 5, base: float = 2.0):
@@ -184,7 +200,7 @@ def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "anim
     )
     try:
         def _gen():
-            return client().models.generate_content(model=TEXT_MODEL, contents=prompt)
+            return story_client().models.generate_content(model=TEXT_MODEL, contents=prompt)
 
         resp = _call_with_retry(_gen)
         text = (resp.text or "").strip()
