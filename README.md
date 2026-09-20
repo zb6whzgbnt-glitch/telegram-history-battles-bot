@@ -10,7 +10,7 @@
 ## الأسرار المطلوبة
 - `TELEGRAM_BOT_TOKEN`
 - `GEMINI_API_KEY` (Aoede TTS + main prep / finalize fallback)
-- `GEMINI_STORY_API_KEY` (اختياري — نهائي مع تشكيل كامل)
+- `GEMINI_STORY_API_KEY` (مفتاح نهائي/سرد مخصص — قصة أطفال مع تشكيل كامل)
 - `TALKING_MINI_API_KEY` (اختياري — Gemini ثانٍ للتحضير: استخراج / إعادة صياغة / مسودة عربية؛ soft-fail عند 403)
 - `COHERE_API_KEY` (اختياري — احتياطي للتحضير)
 - `SUBSCRIBER_CHAT_IDS` (اختياري، معرفات مفصولة بفواصل)
@@ -18,7 +18,7 @@
 ## مسار النماذج
 1. **تحضير (prep):** Talking Mini Gemini → main Gemini → Cohere → Cloudflare Llama → BeautifulSoup  
    (توزيع الحمل: استخراج/ترجمة تفضّل Talking Mini؛ إعادة الصياغة تفضّل main)
-2. **نهائي:** `GEMINI_API_KEY` → `TALKING_MINI_API_KEY` → `GEMINI_STORY_API_KEY` — قصة أطفال مع تشكيل كامل
+2. **نهائي:** `GEMINI_STORY_API_KEY` → `GEMINI_API_KEY` → `TALKING_MINI_API_KEY` — قصة أطفال مشوّقة تفاعلية مع تشكيل كامل
 3. **صوت:** Gemini TTS **Aoede** على `GEMINI_API_KEY`
 
 ## ملاحظة
@@ -28,5 +28,6 @@
 - عنوان القصة = **اسم البطل أو البطلة** بالعربية؛ الأسماء المستخدمة تُحفظ في قاعدة البيانات فلا تتكرر.
 
 ## الصوت والنص
-- الراوية: Gemini TTS **Aoede** فقط (هادئة مستقرة، سرعة ثابتة).
+- الراوية: Gemini TTS **Aoede** فقط (هادئة مستقرة مع لمسة تشويق خفيفة، سرعة ثابتة).
+- الأسلوب: مغامرة + تشويق خفيف + تفاعل بلاغي قصير مع الطفل (بدون اختبارات).
 - النص مع تشكيل كامل، يُرسل كملف `.txt` ثم الصوت.

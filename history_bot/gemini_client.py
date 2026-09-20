@@ -20,7 +20,7 @@ _client = None
 
 # Fixed TTS delivery instruction — same on every call (single or chunked).
 TTS_INSTRUCTION = (
-    "اقرأ النص بنبرة راوية قصص أطفال، بصوت هادئ ومستقر، "
+    "اقرأ النص بنبرة راوية قصص أطفال، بصوت هادئ ومستقر مع لمسة تشويق خفيفة، "
     "ومخارج حروف واضحة وسرعة معتدلة وثابتة تماماً من البداية للنهاية."
 )
 
@@ -88,11 +88,15 @@ def _client_for_key(api_key: str) -> genai.Client:
 
 
 def _finalize_key_candidates() -> list[tuple[str, str]]:
-    """Ordered finalize keys: main → talking-mini → story. Dedupe by value."""
+    """Ordered finalize keys: story (dedicated narration) → main → talking-mini.
+
+    Prefer GEMINI_STORY_API_KEY first for kids finalize text. Dedupe by value so a
+    shared verify/talking key is not tried twice.
+    """
     ordered = [
+        ("gemini-story", GEMINI_STORY_API_KEY),
         ("gemini-main", GEMINI_API_KEY),
         ("gemini-talking-mini", TALKING_MINI_API_KEY),
-        ("gemini-story", GEMINI_STORY_API_KEY),
     ]
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -168,7 +172,7 @@ def _call_with_retry(fn, tries: int = 5, base: float = 2.0):
 def story_client() -> genai.Client:
     """Best-effort single client for callers that still expect story_client().
 
-    Finalize itself iterates keys; this prefers main then talking-mini then story.
+    Finalize itself iterates keys; this prefers story then main then talking-mini.
     """
     cands = _finalize_key_candidates()
     if not cands:
@@ -213,7 +217,7 @@ def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "anim
     Title MUST be the main hero/heroine Arabic name only.
     used_heroes: blocklist of recently used hero names (do not reuse as titles).
     Prefers an Arabic draft from prep when present; else source text.
-    Finalize keys: gemini-main → gemini-talking-mini → gemini-story.
+    Finalize keys: gemini-story → gemini-main → gemini-talking-mini.
     """
     age_line = (
         "الفئة: دون السابعة — لغة بسيطة، جمل قصيرة، مغامرة خفيفة مع غموض لطيف يحفّز الانتباه، بدون عنف أو رعب مرعب."
@@ -254,19 +258,26 @@ def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "anim
             f"النص:\n{story['text_en']}\n"
         )
         transform_line = (
-            "أنت كاتب قصص أطفال عربي محترف متخصص في المغامرات والتشويق.\n"
-            "حوّل النص الأصلي التالي (أي لغة) إلى قصة عربية فصحى بسيطة عالية الجودة تناسب الأطفال، مع تعريب كامل:\n"
+            "أنت كاتب قصص أطفال عربي محترف متخصص في المغامرات والتشويق والتفاعل اللطيف.\n"
+            "حوّل النص الأصلي التالي (أي لغة) إلى قصة عربية فصحى بسيطة عالية الجودة تناسب الأطفال، بمغامرة حسية وحوار نشط وتفاعل خفيف مع المستمع، مع تعريب كامل:\n"
         )
     prompt = (
         transform_line
         + f"- {age_line}\n"
         + f"- {genre_line}\n"
         + f"- {length_line}\n"
-        + "- اكتب بأسلوب مشوّق: بداية جذابة، تصاعد توتر، لحظة ذروة، ثم نهاية مطمئنة.\n"
-        + "- أدخل عنصر مغامرة ولغز/غموض خفيف يحفّز الانتباه (باب يُطرق ليلاً، ظل في الممر، صوت غريب، خريطة ناقصة...) مع بقاء القصة آمنة للأطفال.\n"
+        + "- اكتب بأسلوب مشوّق تفاعلي: بداية جذّابة فوراً، تصاعد مغامرة، محطات تشويق قصيرة (cliffhangers)، "
+        "ذروة واضحة، ثم نهاية مطمئنة دافئة.\n"
+        + "- زِد المغامرة والتشويق الخفيف المناسب للأطفال: أسرار، طرق ملتوية، أصوات بعيدة، ظلال، أبواب تُطرق، "
+        "خرائط ناقصة، مفاجآت لطيفة — بلا دماء ولا عنف قاسٍ ولا رعب مرعب.\n"
+        + "- تفاصيل حسية حيّة (ماذا يُرى/يُسمع/يُشم/يُلمس) وحوار نشط قصير بين الشخصيات يحرّك الحدث.\n"
+        + "- تفاعلية خفيفة مع الطفل المستمع دون تحويل القصة إلى اختبار أو ألعاب أسئلة: "
+        "سؤال بلاغي واحد أو اثنان مثل «ماذا سيحدث؟» أو «هل تتخيّل ما وراء الباب؟»، "
+        "ودعوات قصيرة للتخيّل، ثم عُد فوراً إلى السرد.\n"
+        + "- لا تكسر الإيقاع بسرد طويل من التعليمات؛ اجعل التفاعل جزءاً من الحكاية نفسها.\n"
         + "- غيّر الأسماء والشخصيات والأماكن والطابع إلى بيئة عربية أصيلة "
         "(مثل: سارة، يوسف، نورة، خالد، بغداد، دمشق، قرية النخيل...) ولا تُبقِ أسماء أجنبية.\n"
-        + "- اجعل الأجواء عربية خالصة مع عبرة واضحة.\n"
+        + "- اجعل الأجواء عربية خالصة مع عبرة واضحة في الخاتمة.\n"
         + "- اكتب فصحى بسيطة مضبوطة لغوياً ونحوياً، مع تشكيل كامل (تَشْكِيل) على كل الكلمات "
         "في العنوان ونص القصة (الحركات: فتحة، ضمة، كسرة، سكون، تنوين، شدة).\n"
         + "- لا تستخدم إيموجي ولا عناوين فرعية كثيرة.\n"
