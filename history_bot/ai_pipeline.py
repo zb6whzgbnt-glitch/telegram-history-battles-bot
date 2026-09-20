@@ -7,8 +7,8 @@ Load split preference:
   extract / translate → try Talking Mini first
   rewrite (story-adjust) → try main Gemini first
 
-Finalize with full tashkeel + Aoede TTS stay on GEMINI_STORY_API_KEY / GEMINI_API_KEY
-(see gemini_client.finalize_kids_story / synthesize_long).
+Finalize with full tashkeel: try GEMINI_API_KEY → TALKING_MINI → GEMINI_STORY
+(see gemini_client.finalize_kids_story). Aoede TTS prefers GEMINI_API_KEY.
 """
 from __future__ import annotations
 

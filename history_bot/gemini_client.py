@@ -6,7 +6,14 @@ import time
 from google import genai
 from google.genai import types
 
-from .config import GEMINI_API_KEY, GEMINI_STORY_API_KEY, TEXT_MODEL, TTS_MODEL, TTS_VOICE
+from .config import (
+    GEMINI_API_KEY,
+    GEMINI_STORY_API_KEY,
+    TALKING_MINI_API_KEY,
+    TEXT_MODEL,
+    TTS_MODEL,
+    TTS_VOICE,
+)
 
 log = logging.getLogger("history_bot.gemini")
 _client = None
@@ -62,25 +69,84 @@ def client() -> genai.Client:
     """Client for Gemini TTS (and general). Prefer main GEMINI_API_KEY."""
     global _client
     if _client is None:
-        key = GEMINI_API_KEY or GEMINI_STORY_API_KEY
+        key = GEMINI_API_KEY or TALKING_MINI_API_KEY or GEMINI_STORY_API_KEY
         if not key:
             raise RuntimeError("GEMINI_API_KEY missing")
         _client = genai.Client(api_key=key)
     return _client
 
 
-_story_client = None
+_clients_by_key: dict[str, genai.Client] = {}
 
 
-def story_client() -> genai.Client:
-    """Prefer GEMINI_STORY_API_KEY for final kids retelling text."""
-    global _story_client
-    if _story_client is None:
-        key = GEMINI_STORY_API_KEY or GEMINI_API_KEY
-        if not key:
-            raise RuntimeError("GEMINI_API_KEY missing")
-        _story_client = genai.Client(api_key=key)
-    return _story_client
+def _client_for_key(api_key: str) -> genai.Client:
+    c = _clients_by_key.get(api_key)
+    if c is None:
+        c = genai.Client(api_key=api_key)
+        _clients_by_key[api_key] = c
+    return c
+
+
+def _finalize_key_candidates() -> list[tuple[str, str]]:
+    """Ordered finalize keys: main → talking-mini → story. Dedupe by value."""
+    ordered = [
+        ("gemini-main", GEMINI_API_KEY),
+        ("gemini-talking-mini", TALKING_MINI_API_KEY),
+        ("gemini-story", GEMINI_STORY_API_KEY),
+    ]
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for label, key in ordered:
+        key = (key or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append((label, key))
+    return out
+
+
+def _text_model_candidates() -> list[str]:
+    models: list[str] = []
+    for m in (TEXT_MODEL, "gemini-flash-latest", "gemini-3.6-flash"):
+        m = (m or "").strip()
+        if m and m not in models:
+            models.append(m)
+    return models
+
+
+def _is_permanent_fail(msg: str) -> bool:
+    u = msg.upper()
+    permanent = any(
+        x in u
+        for x in (
+            "403",
+            "404",
+            "PERMISSION_DENIED",
+            "NOT_FOUND",
+            "API_KEY_INVALID",
+            "CONSUMER_INVALID",
+            "PROJECT_DENIED",
+        )
+    )
+    if not permanent:
+        return False
+    # Still retry if the same message also looks transient.
+    return not any(x in u for x in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED"))
+
+
+def _is_retryable(msg: str) -> bool:
+    return any(
+        x in msg
+        for x in (
+            "503",
+            "UNAVAILABLE",
+            "429",
+            "RESOURCE_EXHAUSTED",
+            "high demand",
+            "timed out",
+            "Timeout",
+        )
+    )
 
 
 def _call_with_retry(fn, tries: int = 5, base: float = 2.0):
@@ -91,13 +157,23 @@ def _call_with_retry(fn, tries: int = 5, base: float = 2.0):
         except Exception as e:
             last = e
             msg = str(e)
-            retryable = any(x in msg for x in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "high demand", "timed out", "Timeout"))
-            if not retryable or i == tries - 1:
+            if _is_permanent_fail(msg) or not _is_retryable(msg) or i == tries - 1:
                 raise
             sleep_s = base * (2 ** i) + random.uniform(0, 1.5)
             log.warning("gemini retry %s/%s after %.1fs: %s", i + 1, tries, sleep_s, msg[:160])
             time.sleep(sleep_s)
     raise last  # type: ignore[misc]
+
+
+def story_client() -> genai.Client:
+    """Best-effort single client for callers that still expect story_client().
+
+    Finalize itself iterates keys; this prefers main then talking-mini then story.
+    """
+    cands = _finalize_key_candidates()
+    if not cands:
+        raise RuntimeError("GEMINI_API_KEY missing")
+    return _client_for_key(cands[0][1])
 
 
 def _local_arabize(story: dict, age_band: str, genre: str) -> tuple[str, str]:
@@ -136,7 +212,9 @@ def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "anim
 
     Prefers an Arabic draft from prep (story['arabic_draft'], via Talking Mini /
     main Gemini / Cohere / …) when present; otherwise falls back to source text.
-    TTS (Aoede) stays on GEMINI_API_KEY via client().
+    Finalize keys (until one succeeds): gemini-main → gemini-talking-mini → gemini-story.
+    Models: TEXT_MODEL → gemini-flash-latest → gemini-3.6-flash.
+    TTS (Aoede) prefers GEMINI_API_KEY; talking-mini only if main fails.
     """
     age_line = (
         "الفئة: دون السابعة — لغة بسيطة، جمل قصيرة، مغامرة خفيفة مع غموض لطيف يحفّز الانتباه، بدون عنف أو رعب مرعب."
@@ -199,28 +277,69 @@ def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "anim
         + f"المصدر الأصلي للموقع: {story.get('source', '')}\n\n"
         + source_block
     )
-    try:
-        def _gen():
-            return story_client().models.generate_content(model=TEXT_MODEL, contents=prompt)
-
-        resp = _call_with_retry(_gen)
-        text = (resp.text or "").strip()
-        if not text:
-            raise RuntimeError("empty finalized story")
-        title = draft_title or story.get("title_en", "")
-        body = text
-        if text.startswith("العنوان:") or "العنوان:" in text.split("\n", 1)[0]:
-            first, _, rest = text.partition("\n")
-            title = first.split(":", 1)[-1].strip()
-            body = rest.strip()
-        if "المصدر:" not in body:
-            body = body + f"\n\nالمصدر: {story['source']}"
-        log.info("model=gemini/%s finalize ok title_chars=%s body_words~%s", TEXT_MODEL, len(title), len(body.split()))
-        return enforce_audio_budget(title, body, age_band)
-    except Exception:
-        log.exception("Gemini finalize failed; using local arabized fallback")
+    key_cands = _finalize_key_candidates()
+    model_cands = _text_model_candidates()
+    if not key_cands:
+        log.error("Gemini finalize: no API keys configured; using local arabized fallback")
         t, b = _local_arabize(story, age_band, genre)
         return enforce_audio_budget(t, b, age_band)
+
+    last_err: Exception | None = None
+    for key_label, api_key in key_cands:
+        # Permanent key/project denial: skip remaining models for this key quickly.
+        key_denied = False
+        for model_name in model_cands:
+            try:
+                def _gen(k=api_key, m=model_name):
+                    return _client_for_key(k).models.generate_content(model=m, contents=prompt)
+
+                resp = _call_with_retry(_gen, tries=4, base=2.0)
+                out = (resp.text or "").strip()
+                if not out:
+                    raise RuntimeError("empty finalized story")
+                title = draft_title or story.get("title_en", "")
+                body = out
+                if out.startswith("العنوان:") or "العنوان:" in out.split("\n", 1)[0]:
+                    first, _, rest = out.partition("\n")
+                    title = first.split(":", 1)[-1].strip()
+                    body = rest.strip()
+                if "المصدر:" not in body:
+                    body = body + f"\n\nالمصدر: {story['source']}"
+                log.info(
+                    "finalize ok key=%s model=%s title_chars=%s body_words~%s",
+                    key_label,
+                    model_name,
+                    len(title),
+                    len(body.split()),
+                )
+                return enforce_audio_budget(title, body, age_band)
+            except Exception as exc:
+                last_err = exc
+                msg = str(exc)
+                log.warning(
+                    "finalize soft-fail key=%s model=%s: %s",
+                    key_label,
+                    model_name,
+                    msg[:200],
+                )
+                # 403 / project denied / invalid key → skip other models on this key
+                if any(
+                    x in msg.upper()
+                    for x in ("403", "PERMISSION_DENIED", "API_KEY_INVALID", "CONSUMER_INVALID")
+                ):
+                    key_denied = True
+                    break
+                # 404 / NOT_FOUND on model → try next model
+                continue
+        if key_denied:
+            continue
+
+    log.error(
+        "Gemini finalize: all keys/models failed (last=%s); using local arabized fallback",
+        str(last_err)[:180] if last_err else "none",
+    )
+    t, b = _local_arabize(story, age_band, genre)
+    return enforce_audio_budget(t, b, age_band)
 
 
 def arabize_story(story: dict, age_band: str = "over8", genre: str = "animals") -> tuple[str, str]:
@@ -242,28 +361,24 @@ def _spoken_body(narration: str) -> str:
     return spoken_body
 
 
-def synthesize_pcm(narration: str, voice: str | None = None) -> tuple[bytes, int]:
-    """Synthesize one PCM clip with Aoede + fixed Arabic kids-narrator instruction."""
-    voice_name = voice or TTS_VOICE
-    spoken_body = _spoken_body(narration)
-    # Keep tashkeel; fixed instruction every call for stable pitch/pace.
-    spoken = f"{TTS_INSTRUCTION}\n\n{spoken_body}"
+def _tts_key_candidates() -> list[tuple[str, str]]:
+    """TTS prefers main GEMINI_API_KEY (Aoede); talking-mini only as backup."""
+    ordered = [
+        ("gemini-main", GEMINI_API_KEY),
+        ("gemini-talking-mini", TALKING_MINI_API_KEY),
+    ]
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for label, key in ordered:
+        key = (key or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append((label, key))
+    return out
 
-    def _gen():
-        return client().models.generate_content(
-            model=TTS_MODEL,
-            contents=spoken,
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
-                    )
-                ),
-            ),
-        )
 
-    resp = _call_with_retry(_gen, tries=6, base=3.0)
+def _pcm_from_response(resp) -> tuple[bytes, int]:
     parts = resp.candidates[0].content.parts
     raw = b""
     rate = 24000
@@ -285,6 +400,48 @@ def synthesize_pcm(narration: str, voice: str | None = None) -> tuple[bytes, int
     if not raw:
         raise RuntimeError("empty tts audio")
     return raw, rate
+
+
+def synthesize_pcm(narration: str, voice: str | None = None) -> tuple[bytes, int]:
+    """Synthesize one PCM clip with Aoede + fixed Arabic kids-narrator instruction.
+
+    Prefer GEMINI_API_KEY (main) for Aoede; fall back to talking-mini only if main fails.
+    """
+    voice_name = voice or TTS_VOICE
+    spoken_body = _spoken_body(narration)
+    # Keep tashkeel; fixed instruction every call for stable pitch/pace.
+    spoken = f"{TTS_INSTRUCTION}\n\n{spoken_body}"
+    cands = _tts_key_candidates()
+    if not cands:
+        raise RuntimeError("GEMINI_API_KEY missing")
+
+    last_err: Exception | None = None
+    for key_label, api_key in cands:
+        try:
+            def _gen(k=api_key):
+                return _client_for_key(k).models.generate_content(
+                    model=TTS_MODEL,
+                    contents=spoken,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["AUDIO"],
+                        speech_config=types.SpeechConfig(
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
+                            )
+                        ),
+                    ),
+                )
+
+            resp = _call_with_retry(_gen, tries=6, base=3.0)
+            raw, rate = _pcm_from_response(resp)
+            if key_label != "gemini-main":
+                log.info("tts ok via fallback key=%s voice=%s", key_label, voice_name)
+            return raw, rate
+        except Exception as exc:
+            last_err = exc
+            log.warning("tts soft-fail key=%s: %s", key_label, str(exc)[:180])
+            continue
+    raise last_err or RuntimeError("tts failed")
 
 
 def _split_chunks(body: str, limit: int = 1400) -> list[str]:

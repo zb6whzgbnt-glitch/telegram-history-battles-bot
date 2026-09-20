@@ -18,7 +18,7 @@
 ## مسار النماذج
 1. **تحضير (prep):** Talking Mini Gemini → main Gemini → Cohere → Cloudflare Llama → BeautifulSoup  
    (توزيع الحمل: استخراج/ترجمة تفضّل Talking Mini؛ إعادة الصياغة تفضّل main)
-2. **نهائي:** `GEMINI_STORY_API_KEY` / main — قصة أطفال مع تشكيل كامل
+2. **نهائي:** `GEMINI_API_KEY` → `TALKING_MINI_API_KEY` → `GEMINI_STORY_API_KEY` — قصة أطفال مع تشكيل كامل
 3. **صوت:** Gemini TTS **Aoede** على `GEMINI_API_KEY`
 
 ## ملاحظة
