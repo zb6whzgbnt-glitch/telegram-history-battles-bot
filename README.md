@@ -18,8 +18,13 @@
 ## مسار النماذج
 1. **تحضير (prep):** Talking Mini Gemini → main Gemini → Cohere → Cloudflare Llama → BeautifulSoup  
    (توزيع الحمل: استخراج/ترجمة تفضّل Talking Mini؛ إعادة الصياغة تفضّل main)
-2. **نهائي:** `GEMINI_STORY_API_KEY` → `GEMINI_API_KEY` → `TALKING_MINI_API_KEY` — قصة أطفال مشوّقة تفاعلية مع تشكيل كامل
+2. **نهائي + polish:** `GEMINI_STORY_API_KEY` → `GEMINI_API_KEY` → `TALKING_MINI_API_KEY` — ثم تمريرة polish للتشويق والحوار
 3. **صوت:** Gemini TTS **Aoede** على `GEMINI_API_KEY`
+
+## بوابات الجودة
+- رفض قالب `_local_arabize` تماماً في مسار الإرسال (إعادة اختيار مصدر حتى 3 مرات).
+- حد أدنى لكلمات النص العربي: دون 7 ≥ 160، 8+ ≥ 280؛ مع حوار (`قال`/`قالت`/`«`/`؟`) للفئة 8+.
+- تفضيل مصادر سرد كلاسيكية (SurLaLune / Gutenberg / Andersen / Lukoshko) ورفض الصفحات المدرسية القصيرة.
 
 ## ملاحظة
 المهمة تعمل كل 3 ساعات وتلتقط الأوامر لفترة قصيرة. للاشتراك: أرسل `/start` قرب وقت الإرسال، أو ضع معرف محادثتك في `SUBSCRIBER_CHAT_IDS`.

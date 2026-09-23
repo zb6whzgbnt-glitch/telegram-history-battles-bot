@@ -71,7 +71,15 @@ _SKIP_TITLE_RE = re.compile(
     r"subscribe|newsletter|category|tag\b|author\b|"
     r"видеокниг|словарь|конкурс|загадк|докучн|"
     r"cuentos\s+con\s+moraleja|leer\s+y\s+escuchar|"
-    r"mitos\s+y\s+leyendas|recursos\s+educativos"
+    r"mitos\s+y\s+leyendas|recursos\s+educativos|"
+    # Boring school / vocab / counting / lesson vignettes
+    r"vocabulary|vocab|spelling|phonics|grammar|lesson|workbook|"
+    r"counting|numbers?|alphabet|abc\b|sight\s*words?|"
+    r"school\s*day|first\s*day\s*of\s*school|classroom|"
+    r"learn(?:ing)?\s+to\s+(?:count|read|write)|how\s+to\s+count|"
+    r"actividad(?:es)?|ejercicio|ficha|unidad\s+did[aá]ctica|"
+    r"le[cç]on|apprentissage|apprendre\s+[aà]|"
+    r"урок|обучен|считалоч|азбук"
     r")\b"
 )
 
@@ -162,8 +170,8 @@ def _guess_genre(title: str, text: str) -> str:
 
 def _fits_age(words: int, age_band: str) -> bool:
     if age_band == "under7":
-        return 60 <= words <= 450
-    return 180 <= words <= 900
+        return 100 <= words <= 450
+    return 200 <= words <= 900
 
 
 def _looks_like_ocr_junk(text: str) -> bool:
@@ -184,7 +192,7 @@ def _looks_like_ocr_junk(text: str) -> bool:
     return False
 
 
-def _is_quality_story(title: str, body: str, min_words: int = 80, max_words: int = 1600) -> bool:
+def _is_quality_story(title: str, body: str, min_words: int = 130, max_words: int = 1600) -> bool:
     title = (title or "").strip()
     body = (body or "").strip()
     if len(title) < 3 or len(title) > 160:
@@ -200,7 +208,7 @@ def _is_quality_story(title: str, body: str, min_words: int = 80, max_words: int
         return False
     # Prefer narrative: at least a couple of sentence-like breaks or dialogue
     if body.count(".") + body.count("!") + body.count("?") + body.count("。") + body.count("…") < 2:
-        if words < 120:
+        if words < 160:
             return False
     return True
 
@@ -1065,12 +1073,49 @@ def _collect_pool() -> list[dict]:
     return uniq
 
 
+# Classic narrative sources — strongly preferred over thin school vignettes.
+_PREFERRED_SOURCES = (
+    "surlalune",
+    "gutenberg australia",
+    "project gutenberg australia",
+    "aesop",
+    "andersen",
+    "лукошко",
+    "русказ",
+    "rustih",
+    "main lesson",
+    "baldwin",
+    "il était",
+    "iletait",
+)
+_DEMOTED_SOURCES = (
+    "mundo primaria",
+    "cervantes",
+    "contes.biz",
+    "trove",
+)
+
+_ADVENTURE_KEYWORDS = (
+    "adventure", "mystery", "dark", "shadow", "forest", "cave", "ghost",
+    "dragon", "quest", "secret", "night", "castle", "king", "queen", "magic",
+    "treasure", "journey", "wolf", "giant", "witch", "enchant",
+    "волк", "лес", "замок", "сказк", "царь", "колдун",
+    "bosque", "dragón", "castillo", "tesoro", "magia", "secreto",
+    "forêt", "dragon", "château", "trésor", "sorci", "aventure",
+    "aventure", "mystère",
+)
+
+
 def pick_unused_story(
     sent: set[str],
     age_band: str = "over8",
     genre: str = "animals",
     sent_titles: set[str] | None = None,
 ) -> dict | None:
+    """Rank unused stories by length, adventure cues, preferred classic sources.
+
+    Picks randomly from the top tier so we avoid thin school pages and bland shorts.
+    """
     used_titles = sent_titles or set()
     pool = []
     for s in _collect_pool():
@@ -1079,52 +1124,79 @@ def pick_unused_story(
         key = normalize_title(s.get("title_en", ""))
         if key and key in used_titles:
             continue
-        w = s.get("words", 0)
-        if w < 80 or w > 1400:
+        title = s.get("title_en") or ""
+        if _SKIP_TITLE_RE.search(title):
+            continue
+        w = int(s.get("words", 0) or 0)
+        # Hard floor: prefer substantial narratives (aligned with finalize gates)
+        min_w = 120 if age_band == "under7" else 150
+        if w < min_w or w > 1400:
             continue
         pool.append(s)
     if not pool:
         return None
 
-    primary_sources = (
-        "surlalune", "main lesson", "baldwin", "il était", "iletait",
-        "contes.biz", "gutenberg australia", "русказ", "rustih", "лукошко",
-        "mundo primaria", "cervantes", "trove",
-    )
-
     def score(s: dict) -> int:
         sc = 0
+        w = int(s.get("words", 0) or 0)
+        # Word-count tiers
+        if w >= 400:
+            sc += 8
+        elif w >= 280:
+            sc += 6
+        elif w >= 200:
+            sc += 4
+        elif w >= 150:
+            sc += 2
+
         if s.get("genre") == genre:
             sc += 5
-        if s.get("genre") in ("legend", "history"):
+        if s.get("genre") in ("legend", "history", "animals"):
             sc += 2
-        if _fits_age(s.get("words", 0), age_band):
+        if _fits_age(w, age_band):
             sc += 4
-        elif age_band == "over8" and s.get("words", 0) >= 180:
+        elif age_band == "over8" and w >= 200:
             sc += 2
-        elif age_band == "under7" and s.get("words", 0) <= 500:
+        elif age_band == "under7" and w <= 500:
             sc += 2
+
         src = (s.get("source") or "").lower()
-        if any(x in src for x in primary_sources):
-            sc += 6  # strongly prefer new primary pool
+        if any(x in src for x in _PREFERRED_SOURCES):
+            sc += 10  # classic narrative sources
+        elif any(x in src for x in _DEMOTED_SOURCES):
+            sc -= 2  # thin school / soft-fail portals
         elif "gutenberg" in src:
-            sc += 1  # demote classic gutenberg.org vs new sources
+            sc += 5  # Aesop/Andersen gutenberg.org still good
+
         title = (s.get("title_en") or "").lower()
-        if any(
-            x in title
-            for x in (
-                "adventure", "mystery", "dark", "shadow", "forest", "cave",
-                "ghost", "dragon", "quest", "secret", "night", "волк", "лес",
-                "замок", "bosque", "dragón", "secret", "forêt", "dragon",
-            )
-        ):
-            sc += 3
+        body_head = (s.get("text_en") or "")[:500].lower()
+        blob = title + " " + body_head
+        adv_hits = sum(1 for kw in _ADVENTURE_KEYWORDS if kw in blob)
+        sc += min(adv_hits, 5) * 2
+
+        # Demote explicit school/lesson leftovers that slipped past title skip
+        if any(x in title for x in ("lesson", "school", "vocabulary", "counting", "worksheet")):
+            sc -= 8
         return sc
 
     ranked = sorted(pool, key=score, reverse=True)
-    top = [s for s in ranked if score(s) >= 4] or ranked[:12]
-    # Light language diversity: if many from same source, sample among top.
-    return random.choice(top)
+    if not ranked:
+        return None
+    best = score(ranked[0])
+    # Top tier: within 4 points of best, or score >= 12
+    top = [s for s in ranked if score(s) >= max(best - 4, 12)] or ranked[:8]
+    top = top[:16]
+    chosen = random.choice(top)
+    log.info(
+        "pick story score=%s words=%s source=%s title=%s (tier=%s/%s)",
+        score(chosen),
+        chosen.get("words"),
+        chosen.get("source"),
+        (chosen.get("title_en") or "")[:60],
+        len(top),
+        len(ranked),
+    )
+    return chosen
 
 
 if __name__ == "__main__":

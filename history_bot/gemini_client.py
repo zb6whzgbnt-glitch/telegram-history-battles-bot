@@ -110,8 +110,9 @@ def _finalize_key_candidates() -> list[tuple[str, str]]:
 
 
 def _text_model_candidates() -> list[str]:
+    """Prefer stronger/newer flash models first; keep TEXT_MODEL in the mix."""
     models: list[str] = []
-    for m in (TEXT_MODEL, "gemini-flash-latest", "gemini-3.6-flash"):
+    for m in ("gemini-3.6-flash", "gemini-flash-latest", TEXT_MODEL, "gemini-2.5-flash"):
         m = (m or "").strip()
         if m and m not in models:
             models.append(m)
@@ -181,7 +182,11 @@ def story_client() -> genai.Client:
 
 
 def _local_arabize(story: dict, age_band: str, genre: str) -> tuple[str, str]:
-    """Fallback fully-Arabized short story (with tashkeel) when Gemini text is down."""
+    """INTERNAL TEST HELPER ONLY — never use on the Telegram send path.
+
+    Produces repetitive ~50-word template junk. Kept for offline unit tests;
+    production must raise if Gemini finalize fails.
+    """
     names = {
         "animals": ("سَارَةُ الْقِطَّةُ", "يُوسُفُ الْأَسَدُ", "نُورَةُ الْعُصْفُورَةُ"),
         "legend": ("الْأَمِيرُ خَالِدٌ", "الْجِنِّيَّةُ لَيْلَى", "قَرْيَةُ النَّخِيلِ"),
@@ -208,6 +213,158 @@ def _local_arabize(story: dict, age_band: str, genre: str) -> tuple[str, str]:
             f"هَكَذَا تَعَلَّمَ الْجَمِيعُ أَنَّ الشَّجَاعَةَ الْحَقِيقِيَّةَ تَكُونُ فِي خِدْمَةِ الْآخَرِينَ.\n\n"
             f"المصدر: {story.get('source', 'محلي')}"
         )
+    return title, body
+
+
+# Fingerprints of the deprecated local template — reject if they appear in output.
+_LOCAL_TEMPLATE_FINGERPRINTS = (
+    "فِي زَمَانٍ قَدِيمٍ، انْطَلَقَتْ",
+    "فِي قَرْيَةٍ عَرَبِيَّةٍ جَمِيلَةٍ، عَاشَتْ",
+    "سَاعَدَتْهُمَا",
+    "الشَّجَاعَةَ الْحَقِيقِيَّةَ تَكُونُ فِي خِدْمَةِ الْآخَرِينَ",
+    "تَعَلَّمَ الْجَمِيعُ أَنَّ اللُّطْفَ وَالصَّبْرَ يُضِيئَانِ الدَّرْبَ",
+    "وَاجَهَا عَطَشاً وَرِيحاً شَدِيدَةً",
+)
+
+_DIALOGUE_CUE_RE = re.compile(r"(قال(?:ت|ا|وا)?|«|»|\؟|\?)")
+
+
+class StoryQualityError(RuntimeError):
+    """Raised when a finalized story fails hard quality gates (do not send)."""
+
+
+def _story_body_main(body: str) -> str:
+    main = body or ""
+    if "المصدر:" in main:
+        main = main.split("المصدر:")[0]
+    return main.strip()
+
+
+def _min_body_words(age_band: str) -> int:
+    return 160 if age_band == "under7" else 280
+
+
+def looks_like_local_template(title: str, body: str) -> bool:
+    """Detect repetitive _local_arabize template junk."""
+    blob = f"{title or ''}\n{body or ''}"
+    hits = sum(1 for fp in _LOCAL_TEMPLATE_FINGERPRINTS if fp in blob)
+    if hits >= 1:
+        return True
+    # Fixed cast names from the template paired with very short body
+    cast_bits = ("سَارَةُ الْقِطَّةُ", "يُوسُفُ الْأَسَدُ", "نُورَةُ الْعُصْفُورَةُ", "الْأَمِيرُ خَالِدٌ", "الْجِنِّيَّةُ لَيْلَى")
+    if sum(1 for c in cast_bits if c in blob) >= 2 and len(_story_body_main(body).split()) < 120:
+        return True
+    # Bare "حِكَايَةُ" + tiny repetitive desert template shape
+    if "حِكَايَةُ" in blob and "الصَّحْرَاءِ وَالْوَاحَاتِ" in blob:
+        return True
+    return False
+
+
+def has_dialogue_cue(body: str) -> bool:
+    return bool(_DIALOGUE_CUE_RE.search(_story_body_main(body)))
+
+
+def validate_story_quality(title: str, body: str, age_band: str) -> list[str]:
+    """Return list of failing reason codes (empty = OK)."""
+    reasons: list[str] = []
+    main = _story_body_main(body)
+    words = len(main.split())
+    min_w = _min_body_words(age_band)
+    if words < min_w:
+        reasons.append(f"short_body:{words}<{min_w}")
+    if looks_like_local_template(title, body):
+        reasons.append("local_template_fingerprint")
+    if age_band != "under7" and not has_dialogue_cue(body):
+        reasons.append("missing_dialogue_cue")
+    if not (title or "").strip():
+        reasons.append("empty_title")
+    # Require some Arabic content
+    ar = sum(1 for ch in main if "\u0600" <= ch <= "\u06FF")
+    if ar < 80:
+        reasons.append("too_little_arabic")
+    return reasons
+
+
+def polish_kids_story(
+    title: str,
+    body: str,
+    age_band: str = "over8",
+    genre: str = "animals",
+) -> tuple[str, str]:
+    """Optional second Gemini pass: suspense, vivid scenes, dialogue, keep tashkeel + hero title."""
+    length_line = (
+        "حافظ على طول النص حوالي 180–320 كلمة عربية (ضمن ميزانية الصوت)."
+        if age_band == "under7"
+        else "حافظ على طول النص حوالي 320–580 كلمة عربية (فضّل ≥280 كلمة صافية قبل سطر المصدر)."
+    )
+    prompt = (
+        "أنت محرّر قصص أطفال عربي محترف. حسّن القصة التالية (polish) دون تغيير اسم البطل/العنوان.\n"
+        f"- أبقِ العنوان كما هو تماماً: {title}\n"
+        "- زد التشويق والمشاهد الحسية والحوار النشط والوقفات التفاعلية البلاغية الخفيفة.\n"
+        "- اصنع حبكة فريدة نابعة من النص المعطى — لا قالب صحراء عام مكرر.\n"
+        "- أسماء عربية أصيلة، cliffhangers قصيرة، تفاصيل حسية، نهاية دافئة مطمئنة.\n"
+        "- حافظ على التشكيل الكامل (تَشْكِيل) على كل كلمة.\n"
+        f"- {length_line}\n"
+        "- لا تستخدم إيموجي. لا تغيّر سطر المصدر إن وُجد؛ أعده في الآخر.\n"
+        "- في السطر الأول فقط: العنوان: ثم نفس اسم البطل دون تغيير.\n"
+        "- ثم سطر فارغ ثم نص القصة المشكّل.\n"
+        "- في آخر سطر: المصدر: كما كان.\n\n"
+        f"العنوان الحالي: {title}\n\n"
+        f"النص:\n{body}\n"
+    )
+    key_cands = _finalize_key_candidates()
+    model_cands = _text_model_candidates()
+    if not key_cands:
+        log.warning("polish skipped: no API keys")
+        return title, body
+
+    last_err: Exception | None = None
+    for key_label, api_key in key_cands:
+        key_denied = False
+        for model_name in model_cands:
+            try:
+                def _gen(k=api_key, m=model_name):
+                    return _client_for_key(k).models.generate_content(model=m, contents=prompt)
+
+                resp = _call_with_retry(_gen, tries=3, base=1.5)
+                out = (resp.text or "").strip()
+                if not out:
+                    raise RuntimeError("empty polish")
+                new_title = title
+                new_body = out
+                if out.startswith("العنوان:") or "العنوان:" in out.split("\n", 1)[0]:
+                    first, _, rest = out.partition("\n")
+                    parsed = first.split(":", 1)[-1].strip()
+                    # Keep original hero title unless polish returned something usable
+                    if parsed:
+                        new_title = title  # hero title unchanged by contract
+                    new_body = rest.strip()
+                if "المصدر:" not in new_body and "المصدر:" in (body or ""):
+                    _, _, src_rest = body.rpartition("المصدر:")
+                    new_body = new_body.rstrip() + "\n\nالمصدر:" + src_rest
+                # Prefer polished only if it still passes gates (or is at least as long)
+                reasons = validate_story_quality(new_title, new_body, age_band)
+                if reasons:
+                    log.warning("polish rejected key=%s model=%s reasons=%s", key_label, model_name, reasons)
+                    continue
+                log.info(
+                    "polish ok key=%s model=%s body_words~%s",
+                    key_label,
+                    model_name,
+                    len(_story_body_main(new_body).split()),
+                )
+                return enforce_audio_budget(new_title, new_body, age_band)
+            except Exception as exc:
+                last_err = exc
+                msg = str(exc)
+                log.warning("polish soft-fail key=%s model=%s: %s", key_label, model_name, msg[:180])
+                if any(x in msg.upper() for x in ("403", "PERMISSION_DENIED", "API_KEY_INVALID", "CONSUMER_INVALID")):
+                    key_denied = True
+                    break
+                continue
+        if key_denied:
+            continue
+    log.warning("polish skipped after failures (last=%s); keeping finalize draft", str(last_err)[:160] if last_err else "none")
     return title, body
 
 
@@ -268,6 +425,8 @@ def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "anim
         + f"- {length_line}\n"
         + "- اكتب بأسلوب مشوّق تفاعلي: بداية جذّابة فوراً، تصاعد مغامرة، محطات تشويق قصيرة (cliffhangers)، "
         "ذروة واضحة، ثم نهاية مطمئنة دافئة.\n"
+        + "- مهم: ابنِ حبكة فريدة مستمدة من النص الأصلي — لا تستخدم قالب صحراء/واحة عام مكرر، "
+        "ولا حكاية نمطية عن عطش وريح. أسماء عربية أصيلة وتفاصيل خاصة بالمصدر.\n"
         + "- زِد المغامرة والتشويق الخفيف المناسب للأطفال: أسرار، طرق ملتوية، أصوات بعيدة، ظلال، أبواب تُطرق، "
         "خرائط ناقصة، مفاجآت لطيفة — بلا دماء ولا عنف قاسٍ ولا رعب مرعب.\n"
         + "- تفاصيل حسية حيّة (ماذا يُرى/يُسمع/يُشم/يُلمس) وحوار نشط قصير بين الشخصيات يحرّك الحدث.\n"
@@ -313,9 +472,8 @@ def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "anim
     key_cands = _finalize_key_candidates()
     model_cands = _text_model_candidates()
     if not key_cands:
-        log.error("Gemini finalize: no API keys configured; using local arabized fallback")
-        t, b = _local_arabize(story, age_band, genre)
-        return enforce_audio_budget(t, b, age_band)
+        log.error("Gemini finalize: no API keys configured; refusing local template send")
+        raise RuntimeError("Gemini finalize: no API keys configured")
 
     last_err: Exception | None = None
     for key_label, api_key in key_cands:
@@ -368,11 +526,12 @@ def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "anim
             continue
 
     log.error(
-        "Gemini finalize: all keys/models failed (last=%s); using local arabized fallback",
+        "Gemini finalize: all keys/models failed (last=%s); refusing local template send",
         str(last_err)[:180] if last_err else "none",
     )
-    t, b = _local_arabize(story, age_band, genre)
-    return enforce_audio_budget(t, b, age_band)
+    raise RuntimeError(
+        f"Gemini finalize failed for all keys/models: {last_err}"
+    ) from last_err
 
 
 def _disambiguate_hero_title(title: str, body: str, blocked_keys: set[str]) -> str:
@@ -416,7 +575,11 @@ def arabize_story(
     genre: str = "animals",
     used_heroes: list[str] | None = None,
 ) -> tuple[str, str]:
-    """Prep + Gemini finalize; title is hero name; avoid used hero names."""
+    """Prep + Gemini finalize + quality gates + polish; never ship local template.
+
+    Raises StoryQualityError / RuntimeError if output cannot meet gates — caller
+    should pick another source story (up to 3 attempts per send).
+    """
     from .store import normalize_hero_name
 
     try:
@@ -427,32 +590,93 @@ def arabize_story(
         log.exception("ai_pipeline prepare failed; continuing with raw story to Gemini")
 
     blocked = {normalize_hero_name(h) for h in (used_heroes or []) if h}
-    title, body = finalize_kids_story(
-        story, age_band=age_band, genre=genre, used_heroes=used_heroes
-    )
-    key = normalize_hero_name(title)
-    if key and key not in blocked:
-        return title, body
 
-    log.warning("hero title collision or empty (%s); retrying finalize once", title[:40])
-    title2, body2 = finalize_kids_story(
-        story,
-        age_band=age_band,
-        genre=genre,
-        used_heroes=used_heroes,
-        extra_instruction=(
+    def _finalize_once(extra: str = "") -> tuple[str, str]:
+        return finalize_kids_story(
+            story,
+            age_band=age_band,
+            genre=genre,
+            used_heroes=used_heroes,
+            extra_instruction=extra,
+        )
+
+    title, body = _finalize_once()
+    key = normalize_hero_name(title)
+    if not key or key in blocked:
+        log.warning("hero title collision or empty (%s); retrying finalize once", (title or "")[:40])
+        title2, body2 = _finalize_once(
             "يجب اختيار اسم بطل/بطلة عربي جديد تماماً وغير موجود في قائمة الأسماء المستخدمة. "
             "لا تكرر الاسم السابق. العنوان = الاسم فقط."
-        ),
-    )
-    key2 = normalize_hero_name(title2)
-    if key2 and key2 not in blocked:
-        return title2, body2
+        )
+        key2 = normalize_hero_name(title2)
+        if key2 and key2 not in blocked:
+            title, body = title2, body2
+        else:
+            title = _disambiguate_hero_title(title2 or title, body2 or body, blocked)
+            body = body2 or body
+            log.warning("hero title still colliding; disambiguated to %s", title[:60])
 
-    # Still colliding: append distinguishing word from plot
-    fixed = _disambiguate_hero_title(title2 or title, body2 or body, blocked)
-    log.warning("hero title still colliding; disambiguated to %s", fixed[:60])
-    return fixed, (body2 or body)
+    # Hard quality gates — never send template junk or too-short flat text
+    reasons = validate_story_quality(title, body, age_band)
+    if reasons:
+        log.warning(
+            "quality gate fail after finalize reasons=%s body_words~%s; re-finalize once",
+            reasons,
+            len(_story_body_main(body).split()),
+        )
+        lengthen = ""
+        if any(r.startswith("short_body") for r in reasons):
+            lengthen = "أطل النص وزد التشويق"
+        dialogue = ""
+        if "missing_dialogue_cue" in reasons:
+            dialogue = "أضف حواراً نشطاً واضحاً (قال/قالت أو «…») وسؤالاً بلاغياً خفيفاً."
+        anti_tmpl = ""
+        if "local_template_fingerprint" in reasons:
+            anti_tmpl = "لا تستخدم قالباً عاماً؛ ابنِ أحداثاً خاصة من المصدر."
+        title, body = _finalize_once(
+            " ".join(
+                x
+                for x in (
+                    lengthen,
+                    dialogue,
+                    anti_tmpl,
+                    "اجعل الحبكة فريدة حسية مع نهاية دافئة، وعنوان البطل كما هو إن أمكن.",
+                )
+                if x
+            )
+        )
+        reasons = validate_story_quality(title, body, age_band)
+        if reasons:
+            log.error(
+                "quality gate still failing reasons=%s body_words~%s — discard story",
+                reasons,
+                len(_story_body_main(body).split()),
+            )
+            raise StoryQualityError(
+                f"story failed quality gates: {reasons} body_words~{len(_story_body_main(body).split())}"
+            )
+
+    # Second pass: polish for suspense / vivid scenes / dialogue (best-effort)
+    try:
+        title, body = polish_kids_story(title, body, age_band=age_band, genre=genre)
+    except Exception:
+        log.exception("polish pass crashed; keeping finalize draft")
+
+    # Final gate after polish (polish may have been skipped)
+    reasons = validate_story_quality(title, body, age_band)
+    if reasons:
+        raise StoryQualityError(
+            f"story failed quality gates after polish: {reasons} "
+            f"body_words~{len(_story_body_main(body).split())}"
+        )
+
+    log.info(
+        "arabize ok hero_title=%s body_words~%s age=%s",
+        (title or "")[:80],
+        len(_story_body_main(body).split()),
+        age_band,
+    )
+    return title, body
 
 
 def _spoken_body(narration: str) -> str:

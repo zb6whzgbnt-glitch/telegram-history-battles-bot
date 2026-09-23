@@ -31,45 +31,91 @@ def _safe_filename(title: str, story_id: str) -> str:
 
 
 def _prepare_episode_sync() -> tuple[dict, str, str, bytes, dict] | None:
+    """Pick/finalize up to 3 source stories; never ship local-template fallback."""
+    from .gemini_client import StoryQualityError
+
     profile = store.peek_episode_profile()
-    story = pick_unused_story(
-        store.sent_ids(),
-        age_band=profile["age_band"],
-        genre=profile["genre"],
-        sent_titles=store.sent_title_keys(),
+    sent = set(store.sent_ids())
+    sent_titles = set(store.sent_title_keys())
+    attempted: set[str] = set()
+    last_err: Exception | None = None
+
+    for attempt in range(1, 4):
+        story = pick_unused_story(
+            sent | attempted,
+            age_band=profile["age_band"],
+            genre=profile["genre"],
+            sent_titles=sent_titles,
+        )
+        if not story:
+            log.error("no unused quality story left (attempt %s/3)", attempt)
+            break
+
+        attempted.add(story["id"])
+        # Reserve original English title BEFORE arabize/TTS so it never repeats
+        store.reserve_story(story["id"], story.get("title_en", ""))
+        log.info(
+            "prepare episode attempt=%s/3 source=%s title=%s words=%s",
+            attempt,
+            story.get("source"),
+            (story.get("title_en") or "")[:80],
+            story.get("words"),
+        )
+        used_heroes = store.used_hero_keys(limit=400)
+        try:
+            title_ar, body_ar = arabize_story(
+                story,
+                age_band=profile["age_band"],
+                genre=profile["genre"],
+                used_heroes=used_heroes,
+            )
+        except (StoryQualityError, RuntimeError) as exc:
+            last_err = exc
+            log.warning(
+                "discard source after finalize/quality failure attempt=%s/3 id=%s: %s",
+                attempt,
+                story["id"],
+                str(exc)[:200],
+            )
+            continue
+        except Exception as exc:
+            last_err = exc
+            log.exception(
+                "discard source after unexpected arabize failure attempt=%s/3 id=%s",
+                attempt,
+                story["id"],
+            )
+            continue
+
+        # Reserve Arabic hero/title name so concurrent runs cannot collide
+        if not store.reserve_hero(title_ar, story["id"]):
+            blocked = store.used_hero_normalized_keys()
+            for _ in range(6):
+                blocked = blocked | {store.normalize_hero_name(title_ar)}
+                title_ar = _disambiguate_hero_title(title_ar, body_ar, blocked)
+                if store.reserve_hero(title_ar, story["id"]):
+                    break
+            else:
+                log.error("hero reserve failed after disambiguation title=%s", title_ar[:60])
+        body_words = len((body_ar.split("المصدر:")[0] if "المصدر:" in body_ar else body_ar).split())
+        log.info(
+            "episode ready hero_title=%s body_words~%s voice=%s attempt=%s",
+            title_ar[:80],
+            body_words,
+            TTS_VOICE,
+            attempt,
+        )
+        # Always Aoede — never alternate voices mid-story or across episodes
+        pcm, rate = synthesize_long(body_ar, TTS_VOICE)
+        ogg = pcm_to_ogg(pcm, rate)
+        return story, title_ar, body_ar, ogg, profile
+
+    log.error(
+        "prepare episode failed after %s attempts last=%s",
+        len(attempted),
+        str(last_err)[:180] if last_err else "none",
     )
-    if not story:
-        return None
-    # Reserve original English title BEFORE arabize/TTS so it never repeats
-    store.reserve_story(story["id"], story.get("title_en", ""))
-    log.info("prepare episode source=%s title=%s", story.get("source"), (story.get("title_en") or "")[:80])
-    used_heroes = store.used_hero_keys(limit=400)
-    title_ar, body_ar = arabize_story(
-        story,
-        age_band=profile["age_band"],
-        genre=profile["genre"],
-        used_heroes=used_heroes,
-    )
-    # Reserve Arabic hero/title name so concurrent runs cannot collide
-    if not store.reserve_hero(title_ar, story["id"]):
-        blocked = store.used_hero_normalized_keys()
-        for _ in range(6):
-            blocked = blocked | {store.normalize_hero_name(title_ar)}
-            title_ar = _disambiguate_hero_title(title_ar, body_ar, blocked)
-            if store.reserve_hero(title_ar, story["id"]):
-                break
-        else:
-            log.error("hero reserve failed after disambiguation title=%s", title_ar[:60])
-    log.info(
-        "episode ready hero_title=%s body_words~%s voice=%s",
-        title_ar[:80],
-        len(body_ar.split()),
-        TTS_VOICE,
-    )
-    # Always Aoede — never alternate voices mid-story or across episodes
-    pcm, rate = synthesize_long(body_ar, TTS_VOICE)
-    ogg = pcm_to_ogg(pcm, rate)
-    return story, title_ar, body_ar, ogg, profile
+    return None
 
 
 async def send_one_to(user_ids: list[int], bot: Bot | None = None) -> str | None:
