@@ -257,6 +257,16 @@ _MAGIC_WORDS = (
 )
 
 
+_MYTH_WORDS = (
+    "zeus", "jupiter", "apollo", "apollon", "athena", "athéna", "poseidon", "poséidon", "hermes", "hermès",
+    "hercules", "héraclès", "hercule", "perseus", "persée", "theseus", "thésée", "ulysses", "ulysse",
+    "odysseus", "prometheus", "prométhée", "pandora", "pandore", "minotaur", "minotaure", "daedalus",
+    "dédale", "icarus", "icare", "olympus", "olympe", "medusa", "méduse", "orpheus", "orphée",
+    "зевс", "геракл", "персей", "тесей", "одиссей", "прометей", "икар", "дедал", "олимп",
+    "zeus", "hércules", "perseo", "teseo", "ulises", "prometeo", "ícaro", "dédalo", "olimpo",
+)
+
+
 def _count_hits(blob: str, words: tuple[str, ...]) -> int:
     n = 0
     for w in words:
@@ -309,6 +319,8 @@ def classify_tale_type(story: dict) -> str:
         return "historical"
     if re.search(r"(?i)\b(legend|myth)\b|légende|leyenda|mito\b|легенд|миф", title):
         return "legend"
+    if _count_hits(blob, _MYTH_WORDS) >= 2:
+        return "legend"  # classical mythology (Icarus, Perseus, Prometheus...)
     if _is_cumulative(text):
         return "cumulative"
     if "aesop" in src or "fable" in title or "fábula" in title or "басн" in title:

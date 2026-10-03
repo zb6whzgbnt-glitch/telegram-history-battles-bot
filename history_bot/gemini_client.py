@@ -178,7 +178,8 @@ def min_ratio_for(story: dict) -> float:
         lang = SOURCE_LANG.get(story.get("source", ""), "")
     except Exception:
         lang = ""
-    return FIDELITY_MIN_RATIO_EN if lang == "en" else FIDELITY_MIN_RATIO
+    # en/fr/es: separate articles/prepositions → lower natural Arabic ratio (Icare fr: 0.73)
+    return FIDELITY_MIN_RATIO_EN if lang in ("en", "fr", "es") else FIDELITY_MIN_RATIO
 SINGLE_PASS_MAX_WORDS = 900   # longer sources are translated in sequential parts
 CHUNK_WORDS = 450             # target source words per translated part
 

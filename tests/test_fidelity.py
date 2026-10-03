@@ -101,3 +101,10 @@ def test_original_title_prompt_not_hero_name():
     src = inspect.getsource(G._translate_part)
     assert "ترجمة عربية أمينة للعنوان الأصلي" in src
     assert "اسم البطل" in src  # explicitly told NOT to use the hero name as title
+
+
+def test_myth_is_legend():
+    st = {"title_en": "Icare", "source": "Il était une histoire",
+          "text_en": "Dédale et son fils Icare étaient prisonniers du roi Minos. Icare vola trop près du soleil."}
+    assert S.classify_tale_type(st) == "legend"
+    assert S.tale_type_label(st) == "أسطورة"
