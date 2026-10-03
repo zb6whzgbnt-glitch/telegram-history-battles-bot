@@ -825,11 +825,24 @@ def fetch_ruskazki(limit: int = 14) -> list[dict]:
         try:
             html = _get(url)
             soup = BeautifulSoup(html, "lxml")
-            if soup.title and soup.title.get_text(strip=True):
-                t = soup.title.get_text(strip=True)
-                t = re.sub(r"\s*[:\-–|].*(читать|РуСказ|сказк).*$", "", t, flags=re.I).strip()
-                if t and len(t) < 120:
-                    title = t
+            author = ""
+            kind = ""
+            h1 = soup.select_one("h1")
+            head = h1.get_text(" ", strip=True) if h1 else ""
+            if not head and soup.title:
+                head = re.sub(r"\s*:\s*читать.*$", "", soup.title.get_text(strip=True), flags=re.I)
+            if head:
+                # "Автор — Название: Сказка" → author, title, kind
+                m = re.match(r"^(.*?)(?::\s*([^:]{2,30}))?$", head)
+                core = (m.group(1) if m else head).strip()
+                kind = ((m.group(2) if m else "") or "").strip().lower()
+                if re.search(r"\s[—–-]\s", core):
+                    author, _, core = re.split(r"\s([—–-])\s", core, maxsplit=1)
+                    author = author.strip()
+                if core and len(core) < 120:
+                    title = core.strip()
+            if "стих" in kind or "поэм" in kind:
+                continue  # poems are not narrative stories
             # Skip author archive / list pages
             path = urlparse(url).path.strip("/")
             if path in {"avtorskie-skazki", "russkie-narodnye-skazki"} or path.endswith("/page"):
@@ -861,6 +874,13 @@ def fetch_ruskazki(limit: int = 14) -> list[dict]:
                     continue
             s = _story("ruskazki", "РуСказки / rustih", title, url, body, genre="legend")
             if s:
+                if author:
+                    # Authored work (not anonymous folklore): never "folk"
+                    s["author"] = author
+                    if "рассказ" in kind:
+                        s["tale_type"] = "literary"
+                    elif s["tale_type"] == "folk":
+                        s["tale_type"] = "literary"
                 out.append(s)
         except Exception:
             log.exception("ruskazki story failed: %s", url)

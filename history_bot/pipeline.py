@@ -114,6 +114,8 @@ def build_card(story: dict, title_ar: str, body_ar: str, age_band: str) -> str:
     src_line = f"المصدر: {story.get('source', '')}"
     if story.get("title_en"):
         src_line += f" — العنوان الأصلي: {story['title_en']}"
+    if story.get("author"):
+        src_line += f" — المؤلف: {story['author']}"
     body = body_ar.split("المصدر:")[0].rstrip() if "المصدر:" in body_ar else body_ar.rstrip()
     return (
         f"{title_ar}\n"

@@ -93,3 +93,11 @@ def test_parse_header_title_and_names():
     assert t == "فَتَى الْكَعْكِ"
     assert names == ["سَلِيمٌ", "هِنْدُ"]
     assert body == "كَانَ يَا مَا كَانَ"
+
+
+def test_original_title_prompt_not_hero_name():
+    # Title instruction must ask for a translation of the ORIGINAL title
+    import inspect
+    src = inspect.getsource(G._translate_part)
+    assert "ترجمة عربية أمينة للعنوان الأصلي" in src
+    assert "اسم البطل" in src  # explicitly told NOT to use the hero name as title
