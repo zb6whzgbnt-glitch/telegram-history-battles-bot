@@ -1,14 +1,16 @@
-"""Multi-model story prep: dual Gemini + Cohere (+ optional Cloudflare Llama).
+"""Source prep: clean scraped text WITHOUT changing the story.
 
-Prep chain (per step, soft-fail):
-  Talking Mini Gemini → main/story Gemini → Cohere → Cloudflare Llama → BS/skip
+FIDELITY POLICY: stories are transferred exactly as in the source. Prep only
+removes scraping junk (nav, ads, footnote numbers). It never rewrites,
+summarizes, or drafts a loose Arabic retelling. The previous "rewrite" and
+"Arabic draft" steps were removed because they abridged stories.
 
-Load split preference:
-  extract / translate → try Talking Mini first
-  rewrite (story-adjust) → try main Gemini first
+Clean chain (soft-fail): Talking Mini Gemini → main Gemini → Cohere →
+Cloudflare Llama → keep scraped (BeautifulSoup) text.
+A cleaned text is accepted only if it keeps >= CLEAN_MIN_RATIO of the words.
 
-Finalize with full tashkeel: try GEMINI_STORY → GEMINI_API_KEY → TALKING_MINI
-(see gemini_client.finalize_kids_story). Aoede TTS prefers GEMINI_API_KEY.
+Faithful Arabic translation with full tashkeel happens in
+gemini_client.translate_faithful. Aoede TTS prefers GEMINI_API_KEY.
 """
 from __future__ import annotations
 
@@ -46,7 +48,7 @@ except Exception:
 _gemini_clients: dict[str, object] = {}
 
 
-def _clip(text: str, n: int = 12000) -> str:
+def _clip(text: str, n: int = 40000) -> str:
     text = (text or "").strip()
     if len(text) <= n:
         return text
@@ -258,136 +260,72 @@ def _parse_title_body(text: str, fallback_title: str) -> tuple[str, str]:
     return fallback_title, text
 
 
+CLEAN_MIN_RATIO = 0.9
+
+
 def extract_clean_story(story: dict) -> dict:
-    """AI-clean scraped title+body. Prefer Talking Mini Gemini, then main, then Cohere/CF/BS."""
+    """AI-clean scraped title+body without touching the narrative.
+
+    Accepted only if the cleaned body keeps >= CLEAN_MIN_RATIO of the words;
+    otherwise the scraped text is kept verbatim.
+    """
     title = story.get("title_en") or ""
     body = story.get("text_en") or ""
+    raw_words = len(body.split())
     system = (
-        "You clean children's folk/fairy tale text. Remove navigation, ads, UI chrome, "
-        "footnotes, 'subscribe', font-size widgets, and OCR junk. Keep the complete narrative. "
+        "You clean scraped text of a children's folk/fairy tale. Remove ONLY website junk: "
+        "navigation, ads, UI chrome, share buttons, copyright footers, editor notes, and "
+        "footnote/annotation reference numbers glued to words. "
+        "Do NOT remove, shorten, merge, reorder, summarize, or reword ANY sentence of the tale. "
+        "Keep every repetition, refrain, rhyme/verse line (one per line), dialogue line and the "
+        "exact original ending. Keep the original language and spelling. "
         "Output EXACTLY:\nTITLE: ...\nBODY: ...\n"
-        "Keep the original language. Do not invent a new plot."
     )
     prompt = (
         f"Source: {story.get('source', '')}\nURL: {story.get('source_url', '')}\n\n"
         f"Raw title:\n{title}\n\nRaw body:\n{_clip(body)}\n"
     )
-
-    text, used = _prep_chain(prompt, system, prefer="talking-mini", max_tokens=2500)
+    max_tokens = max(4000, int(raw_words * 3))
+    text, used = _prep_chain(prompt, system, prefer="talking-mini", max_tokens=max_tokens)
     out = dict(story)
+    out["source_words_raw"] = raw_words
     if not text:
-        log.info("extract: BeautifulSoup fallback (no AI clean)")
+        log.info("extract: keep scraped text verbatim (no AI clean) words=%s", raw_words)
         out["extract_model"] = "beautifulsoup"
         return out
     t, b = _parse_title_body(text, title)
-    if b and len(b.split()) >= 40:
+    new_words = len((b or "").split())
+    if b and raw_words and new_words >= CLEAN_MIN_RATIO * raw_words and new_words <= raw_words * 1.05:
         out["title_en"] = t or title
         out["text_en"] = b
-        out["words"] = len(b.split())
+        out["words"] = new_words
         out["extract_model"] = used
-        log.info("extract: cleaned via %s words=%s", used, out["words"])
+        log.info("extract: cleaned via %s words=%s (raw=%s)", used, new_words, raw_words)
     else:
-        out["extract_model"] = f"{used}+beautifulsoup"
-        log.info("extract: AI too short; keeping BS text")
-    return out
-
-
-def rewrite_source_quality(story: dict) -> dict:
-    """Light rewrite / story-adjust in source language. Prefer main Gemini, then Talking Mini."""
-    title = story.get("title_en") or ""
-    body = story.get("text_en") or ""
-    system = (
-        "You are an editor of classic children's tales. Lightly normalize spelling and "
-        "paragraphs in the SAME language as the input. Do not modernize culture, do not "
-        "shorten below ~80% length, do not add morals lectures. "
-        "Output EXACTLY:\nTITLE: ...\nBODY: ..."
-    )
-    prompt = f"TITLE: {title}\n\nBODY:\n{_clip(body)}\n"
-
-    text, used = _prep_chain(prompt, system, prefer="main", max_tokens=3000)
-    out = dict(story)
-    if not text:
-        out["rewrite_model"] = "skip"
-        return out
-    t, b = _parse_title_body(text, title)
-    if b and len(b.split()) >= 60:
-        out["title_en"] = t or title
-        out["text_en"] = b
-        out["words"] = len(b.split())
-        out["rewrite_model"] = used
-        log.info("rewrite: via %s words=%s", used, out["words"])
-    else:
-        out["rewrite_model"] = "skip"
-    return out
-
-
-def translate_arabic_draft(story: dict, age_band: str = "over8", genre: str = "legend") -> dict:
-    """Translate/adapt to a clear Arabic draft (NO tashkeel) — Gemini finalize adds tashkeel later."""
-    title = story.get("title_en") or ""
-    body = story.get("text_en") or ""
-    age = "under 7" if age_band == "under7" else "8+"
-    system = (
-        "You translate children's stories into simple Modern Standard Arabic (فصحى بسيطة). "
-        "Arabize character and place names to familiar Arabic ones. "
-        "Do NOT add full tashkeel/diacritics. Do NOT write English. "
-        "Keep a complete short draft suitable for later dramatic retelling. "
-        "Output EXACTLY:\nالعنوان: ...\nالنص: ..."
-    )
-    prompt = (
-        f"Age band: {age}. Genre hint: {genre}.\n"
-        f"Original title: {title}\nSource: {story.get('source', '')}\n\n"
-        f"Story text:\n{_clip(body)}\n"
-    )
-
-    text, used = _prep_chain(prompt, system, prefer="talking-mini", max_tokens=2800)
-    out = dict(story)
-    if not text:
-        out["translate_model"] = "none"
-        out["arabic_draft"] = ""
-        log.info("translate: no AI draft (Gemini will arabize from source text)")
-        return out
-    # Parse Arabic draft
-    t, b = _parse_title_body(text, title)
-    if "العنوان:" in text.split("\n", 1)[0]:
-        first, _, rest = text.partition("\n")
-        t = first.split(":", 1)[-1].strip()
-        rest = rest.strip()
-        if rest.startswith("النص:"):
-            b = rest.split(":", 1)[-1].strip()
-        else:
-            b = rest
-    # Must contain Arabic letters
-    if b and any("\u0600" <= ch <= "\u06FF" for ch in b):
-        out["arabic_draft_title"] = t
-        out["arabic_draft"] = b
-        out["translate_model"] = used
-        log.info("translate: draft via %s arabic_words~%s", used, len(b.split()))
-    else:
-        out["translate_model"] = "none"
-        out["arabic_draft"] = ""
-        log.info("translate: AI output not Arabic; skipping draft")
+        out["extract_model"] = f"{used}-rejected+beautifulsoup"
+        log.info(
+            "extract: AI clean rejected (words %s vs raw %s; must keep >=%.0f%%); keeping scraped text",
+            new_words, raw_words, CLEAN_MIN_RATIO * 100,
+        )
     return out
 
 
 def prepare_story_for_gemini(story: dict, age_band: str = "over8", genre: str = "legend") -> dict:
-    """Full prep chain with soft fallbacks. Logs which models ran (gemini-talking-mini / gemini-main / …)."""
+    """Clean-only prep (no rewrite / no Arabic draft) so the source stays complete."""
     log.info(
-        "ai_pipeline start source=%s title=%s talking_mini=%s gemini_main=%s cohere=%s cf_llama=%s",
+        "ai_pipeline start source=%s title=%s words=%s talking_mini=%s gemini_main=%s cohere=%s cf_llama=%s",
         story.get("source"),
         (story.get("title_en") or "")[:60],
+        story.get("words"),
         bool(TALKING_MINI_API_KEY),
         bool(GEMINI_API_KEY or GEMINI_STORY_API_KEY),
         bool(COHERE_API_KEY),
         bool(CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID),
     )
     s = extract_clean_story(story)
-    s = rewrite_source_quality(s)
-    s = translate_arabic_draft(s, age_band=age_band, genre=genre)
-    log.info(
-        "ai_pipeline done extract=%s rewrite=%s translate=%s draft=%s",
-        s.get("extract_model"),
-        s.get("rewrite_model"),
-        s.get("translate_model"),
-        "yes" if s.get("arabic_draft") else "no",
-    )
+    # Fidelity: never hand finalize a loose Arabic draft; translate from the source.
+    s.pop("arabic_draft", None)
+    s.pop("arabic_draft_title", None)
+    log.info("ai_pipeline done extract=%s words=%s (rewrite/draft disabled for fidelity)",
+             s.get("extract_model"), s.get("words"))
     return s

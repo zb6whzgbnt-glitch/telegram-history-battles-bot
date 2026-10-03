@@ -39,3 +39,4 @@ FEMALE_VOICE = "Aoede"
 MALE_VOICE = "Aoede"
 SEND_HOURS = [(0, 0), (3, 0), (6, 0), (9, 0), (12, 0), (15, 0), (18, 0), (21, 0)]
 USER_AGENT = "KidsStoriesBot/1.0 (+personal telegram bedtime bot)"
+CATALOG_PATH = ROOT / "history_bot" / "data" / "battles.json"  # legacy battles catalog (tests)

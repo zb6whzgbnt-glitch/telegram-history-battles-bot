@@ -1,5 +1,7 @@
 from __future__ import annotations
+import json
 import logging
+import os
 import re
 import random
 import time
@@ -33,36 +35,6 @@ def strip_tashkeel(text: str) -> str:
     Kept for optional tooling; arabize + TTS now KEEP full tashkeel.
     """
     return _TASHKEEL_RE.sub("", text)
-
-
-def _arabic_words(text: str) -> list[str]:
-    return [w for w in text.split() if any("\u0600" <= ch <= "\u06FF" for ch in w) or w.isalpha()]
-
-
-def enforce_audio_budget(title: str, body: str, age_band: str) -> tuple[str, str]:
-    """Hard-cap Arabic body for ~3–6 minutes audio (~100 wpm expressive)."""
-    max_words = 320 if age_band == "under7" else 600
-    # Keep source line if present
-    source = ""
-    main = body
-    if "المصدر:" in body:
-        main, _, rest = body.rpartition("المصدر:")
-        source = "المصدر:" + rest
-        main = main.rstrip()
-    words = main.split()
-    if len(words) <= max_words:
-        return title, body
-    cut = " ".join(words[:max_words]).rstrip("،,;؛:")
-    # Prefer ending on a sentence boundary
-    for end in ("۔", ".", "!", "؟", "…"):
-        idx = cut.rfind(end)
-        if idx >= int(max_words * 0.55):
-            cut = cut[: idx + 1]
-            break
-    out = cut.strip()
-    if source:
-        out = out + "\n\n" + source.strip()
-    return title, out
 
 
 def client() -> genai.Client:
@@ -112,7 +84,7 @@ def _finalize_key_candidates() -> list[tuple[str, str]]:
 def _text_model_candidates() -> list[str]:
     """Prefer stronger/newer flash models first; keep TEXT_MODEL in the mix."""
     models: list[str] = []
-    for m in ("gemini-3.6-flash", "gemini-flash-latest", TEXT_MODEL, "gemini-2.5-flash"):
+    for m in ("gemini-3.6-flash", "gemini-flash-latest", TEXT_MODEL, "gemini-3.8-flash"):
         m = (m or "").strip()
         if m and m not in models:
             models.append(m)
@@ -181,39 +153,84 @@ def story_client() -> genai.Client:
     return _client_for_key(cands[0][1])
 
 
-def _local_arabize(story: dict, age_band: str, genre: str) -> tuple[str, str]:
-    """INTERNAL TEST HELPER ONLY — never use on the Telegram send path.
+# ---------------------------------------------------------------------------
+# FIDELITY POLICY (hard requirement from the user)
+#   Stories are transferred EXACTLY as in the source: complete, same events,
+#   same order, same repetitions/refrains, same dialogue, same ending, same
+#   authorial tone. The ONLY change allowed is arabization of personal names,
+#   places, foods and cultural items. No abridging, no softened endings, no
+#   invented dialogue/suspense, no word-budget truncation.
+# ---------------------------------------------------------------------------
 
-    Produces repetitive ~50-word template junk. Kept for offline unit tests;
-    production must raise if Gemini finalize fails.
-    """
-    names = {
-        "animals": ("سَارَةُ الْقِطَّةُ", "يُوسُفُ الْأَسَدُ", "نُورَةُ الْعُصْفُورَةُ"),
-        "legend": ("الْأَمِيرُ خَالِدٌ", "الْجِنِّيَّةُ لَيْلَى", "قَرْيَةُ النَّخِيلِ"),
-        "human": ("سَارَةُ", "يُوسُفُ", "أُمُّ نُورَةَ"),
-        "history": ("الصَّبِيُّ عُمَرُ", "بَغْدَادُ", "الْعَالِمُ الْحَسَنُ"),
-    }
-    a, b, c = names.get(genre, names["human"])
-    # Title = hero/heroine name only (Arabic)
-    title = a
-    if age_band == "under7":
-        body = (
-            f"فِي قَرْيَةٍ عَرَبِيَّةٍ جَمِيلَةٍ، عَاشَتْ {a} مَعَ {b}. "
-            f"ذَاتَ يَوْمٍ ضَاعَتْ طَرِيقُهُمَا، فَسَاعَدَتْهُمَا {c} بِقَلْبٍ طَيِّبٍ. "
-            f"تَعَلَّمَ الْجَمِيعُ أَنَّ اللُّطْفَ وَالصَّبْرَ يُضِيئَانِ الدَّرْبَ. "
-            f"وَعَادُوا إِلَى الْبَيْتِ فَرِحِينَ آمِنِينَ.\n\n"
-            f"المصدر: {story.get('source', 'محلي')}"
-        )
-    else:
-        body = (
-            f"فِي زَمَانٍ قَدِيمٍ، انْطَلَقَتْ {a} مَعَ {b} فِي رِحْلَةٍ طَوِيلَةٍ عَبْرَ الصَّحْرَاءِ وَالْوَاحَاتِ. "
-            f"وَاجَهَا عَطَشاً وَرِيحاً شَدِيدَةً، لَكِنَّهُمَا تَعَاوَنَا وَلَمْ يَسْتَسْلِمَا. "
-            f"فِي الطَّرِيقِ الْتَقَيَا أَطْفَالاً ضَائِعِينَ، فَأَرْشَدَاهُمْ بِالْخَرِيطَةِ وَالْمَاءِ. "
-            f"وَلَمَّا وَصَلَا إِلَى {c}، احْتَفَلَ النَّاسُ بِشَجَاعَتِهِمَا وَكَرَمِهِمَا. "
-            f"هَكَذَا تَعَلَّمَ الْجَمِيعُ أَنَّ الشَّجَاعَةَ الْحَقِيقِيَّةَ تَكُونُ فِي خِدْمَةِ الْآخَرِينَ.\n\n"
-            f"المصدر: {story.get('source', 'محلي')}"
-        )
-    return title, body
+FIDELITY_MIN_RATIO = float(os.environ.get("FIDELITY_MIN_RATIO", "0.7"))
+# English uses many separate articles/prepositions that Arabic attaches to words,
+# so a COMPLETE faithful translation lands around 0.70–0.80 Arabic words per
+# English word (measured: Gingerbread Man 495 → 355 = 0.72). Use a slightly
+# lower floor for English so complete translations are not rejected; the
+# Gemini fidelity audit (verify_fidelity) is the semantic completeness check.
+FIDELITY_MIN_RATIO_EN = float(os.environ.get("FIDELITY_MIN_RATIO_EN", "0.62"))
+
+
+def min_ratio_for(story: dict) -> float:
+    try:
+        from .stories import SOURCE_LANG
+
+        lang = SOURCE_LANG.get(story.get("source", ""), "")
+    except Exception:
+        lang = ""
+    return FIDELITY_MIN_RATIO_EN if lang == "en" else FIDELITY_MIN_RATIO
+SINGLE_PASS_MAX_WORDS = 900   # longer sources are translated in sequential parts
+CHUNK_WORDS = 450             # target source words per translated part
+
+
+def _arabic_words(text: str) -> list[str]:
+    return [w for w in text.split() if any("\u0600" <= ch <= "\u06FF" for ch in w)]
+
+
+def arabic_word_count(text: str) -> int:
+    return len(_arabic_words(_story_body_main(text)))
+
+
+def tashkeel_density(text: str) -> float:
+    """Diacritics per Arabic letter (full tashkeel is roughly 0.6–1.0)."""
+    letters = sum(1 for ch in text if "\u0621" <= ch <= "\u064A")
+    marks = len(_TASHKEEL_RE.findall(text))
+    return marks / max(letters, 1)
+
+
+def _story_body_main(body: str) -> str:
+    main = body or ""
+    if "المصدر:" in main:
+        main = main.split("المصدر:")[0]
+    return main.strip()
+
+
+def _generate_text(prompt: str, purpose: str, tries: int = 4) -> tuple[str, str]:
+    """Run one text prompt across finalize keys/models. Returns (text, 'key/model')."""
+    key_cands = _finalize_key_candidates()
+    model_cands = _text_model_candidates()
+    if not key_cands:
+        raise RuntimeError(f"Gemini {purpose}: no API keys configured")
+    last_err: Exception | None = None
+    for key_label, api_key in key_cands:
+        for model_name in model_cands:
+            try:
+                def _gen(k=api_key, m=model_name):
+                    return _client_for_key(k).models.generate_content(model=m, contents=prompt)
+
+                resp = _call_with_retry(_gen, tries=tries, base=2.0)
+                out = (resp.text or "").strip()
+                if not out:
+                    raise RuntimeError(f"empty {purpose} output")
+                return out, f"{key_label}/{model_name}"
+            except Exception as exc:
+                last_err = exc
+                msg = str(exc)
+                log.warning("%s soft-fail key=%s model=%s: %s", purpose, key_label, model_name, msg[:200])
+                if any(x in msg.upper() for x in ("403", "PERMISSION_DENIED", "API_KEY_INVALID", "CONSUMER_INVALID")):
+                    break  # key denied → next key
+                continue
+    raise RuntimeError(f"Gemini {purpose} failed for all keys/models: {last_err}") from last_err
 
 
 # Fingerprints of the deprecated local template — reject if they appear in output.
@@ -226,463 +243,379 @@ _LOCAL_TEMPLATE_FINGERPRINTS = (
     "وَاجَهَا عَطَشاً وَرِيحاً شَدِيدَةً",
 )
 
-_DIALOGUE_CUE_RE = re.compile(r"(قال(?:ت|ا|وا)?|«|»|\؟|\?)")
-
 
 class StoryQualityError(RuntimeError):
-    """Raised when a finalized story fails hard quality gates (do not send)."""
-
-
-def _story_body_main(body: str) -> str:
-    main = body or ""
-    if "المصدر:" in main:
-        main = main.split("المصدر:")[0]
-    return main.strip()
-
-
-def _min_body_words(age_band: str) -> int:
-    return 160 if age_band == "under7" else 280
+    """Raised when a translated story fails fidelity/quality gates (do not send)."""
 
 
 def looks_like_local_template(title: str, body: str) -> bool:
-    """Detect repetitive _local_arabize template junk."""
     blob = f"{title or ''}\n{body or ''}"
-    hits = sum(1 for fp in _LOCAL_TEMPLATE_FINGERPRINTS if fp in blob)
-    if hits >= 1:
+    if any(fp in blob for fp in _LOCAL_TEMPLATE_FINGERPRINTS):
         return True
-    # Fixed cast names from the template paired with very short body
-    cast_bits = ("سَارَةُ الْقِطَّةُ", "يُوسُفُ الْأَسَدُ", "نُورَةُ الْعُصْفُورَةُ", "الْأَمِيرُ خَالِدٌ", "الْجِنِّيَّةُ لَيْلَى")
-    if sum(1 for c in cast_bits if c in blob) >= 2 and len(_story_body_main(body).split()) < 120:
-        return True
-    # Bare "حِكَايَةُ" + tiny repetitive desert template shape
     if "حِكَايَةُ" in blob and "الصَّحْرَاءِ وَالْوَاحَاتِ" in blob:
         return True
     return False
 
 
-def has_dialogue_cue(body: str) -> bool:
-    return bool(_DIALOGUE_CUE_RE.search(_story_body_main(body)))
+def fidelity_ratio(body_ar: str, source_words: int) -> float:
+    return arabic_word_count(body_ar) / max(int(source_words or 0), 1)
 
 
-def validate_story_quality(title: str, body: str, age_band: str) -> list[str]:
-    """Return list of failing reason codes (empty = OK)."""
+def validate_story_quality(title: str, body: str, source_words: int, min_ratio: float | None = None) -> list[str]:
+    """Return failing reason codes (empty = OK). Length is judged vs the SOURCE."""
     reasons: list[str] = []
-    main = _story_body_main(body)
-    words = len(main.split())
-    min_w = _min_body_words(age_band)
-    if words < min_w:
-        reasons.append(f"short_body:{words}<{min_w}")
+    floor = FIDELITY_MIN_RATIO if min_ratio is None else min_ratio
+    ratio = fidelity_ratio(body, source_words)
+    if source_words and ratio < floor:
+        reasons.append(f"too_short_vs_source:{ratio:.2f}<{floor}")
     if looks_like_local_template(title, body):
         reasons.append("local_template_fingerprint")
-    if age_band != "under7" and not has_dialogue_cue(body):
-        reasons.append("missing_dialogue_cue")
     if not (title or "").strip():
         reasons.append("empty_title")
-    # Require some Arabic content
-    ar = sum(1 for ch in main if "\u0600" <= ch <= "\u06FF")
-    if ar < 80:
+    if arabic_word_count(body) < 30:
         reasons.append("too_little_arabic")
     return reasons
 
 
-def polish_kids_story(
-    title: str,
-    body: str,
-    age_band: str = "over8",
-    genre: str = "animals",
-) -> tuple[str, str]:
-    """Optional second Gemini pass: suspense, vivid scenes, dialogue, keep tashkeel + hero title."""
-    length_line = (
-        "حافظ على طول النص حوالي 180–320 كلمة عربية (ضمن ميزانية الصوت)."
-        if age_band == "under7"
-        else "حافظ على طول النص حوالي 320–580 كلمة عربية (فضّل ≥280 كلمة صافية قبل سطر المصدر)."
-    )
-    prompt = (
-        "أنت محرّر قصص أطفال عربي محترف. حسّن القصة التالية (polish) دون تغيير اسم البطل/العنوان.\n"
-        f"- أبقِ العنوان كما هو تماماً: {title}\n"
-        "- زد التشويق والمشاهد الحسية والحوار النشط والوقفات التفاعلية البلاغية الخفيفة.\n"
-        "- اصنع حبكة فريدة نابعة من النص المعطى — لا قالب صحراء عام مكرر.\n"
-        "- أسماء عربية أصيلة، cliffhangers قصيرة، تفاصيل حسية، نهاية دافئة مطمئنة.\n"
-        "- حافظ على التشكيل الكامل (تَشْكِيل) على كل كلمة.\n"
-        f"- {length_line}\n"
-        "- لا تستخدم إيموجي. لا تغيّر سطر المصدر إن وُجد؛ أعده في الآخر.\n"
-        "- في السطر الأول فقط: العنوان: ثم نفس اسم البطل دون تغيير.\n"
-        "- ثم سطر فارغ ثم نص القصة المشكّل.\n"
-        "- في آخر سطر: المصدر: كما كان.\n\n"
-        f"العنوان الحالي: {title}\n\n"
-        f"النص:\n{body}\n"
-    )
-    key_cands = _finalize_key_candidates()
-    model_cands = _text_model_candidates()
-    if not key_cands:
-        log.warning("polish skipped: no API keys")
-        return title, body
+_FIDELITY_RULES = (
+    "قواعد الأمانة (إلزامية):\n"
+    "1) ترجم النص كاملاً جملةً جملةً بالترتيب نفسه. لا تختصر، ولا تلخّص، ولا تحذف أي حدث أو مشهد أو وصف أو جملة.\n"
+    "2) احتفظ بكل تكرار ولازمة وأنشودة كما هي في الأصل وبالعدد نفسه من المرات (في الحكايات التراكمية تتراكم اللازمة "
+    "سطراً بعد سطر — اكتبها كاملة في كل مرة، كل سطر من الأنشودة في سطر مستقل).\n"
+    "3) احتفظ بكل حوار كما هو، ولا تخترع حواراً أو أسئلة للمستمع أو تشويقاً أو مشاهد أو عبرة غير موجودة في الأصل.\n"
+    "4) احتفظ بالنهاية الأصلية تماماً كما هي حتى لو كانت حزينة أو قاسية (مثلاً إن أُكل البطل يبقى مأكولاً). "
+    "ممنوع تلطيف النهاية أو إنقاذ الشخصية أو تغيير المصير.\n"
+    "5) حافظ على أسلوب المؤلف ونبرته وبنية فقراته وطول جمله قدر ما تسمح العربية.\n"
+    "6) التعريب فقط: استبدل أسماء الأشخاص بأسماء عربية، والأماكن بأماكن عربية، والأطعمة والأدوات والعادات "
+    "بما يقابلها في الثقافة العربية — بشرط أن يؤدي البديل الدور نفسه في الحكاية دون تغيير أي حدث. "
+    "أسماء الحيوانات العامة (الثعلب، البقرة...) تُترجم كما هي.\n"
+    "7) اكتب بالعربية الفصحى السليمة مع تشكيل كامل على كل كلمة (فتحة، ضمة، كسرة، سكون، تنوين، شدة).\n"
+    "8) لا إيموجي، ولا عناوين فرعية، ولا شروح أو ملاحظات من عندك، ولا كلمات إنجليزية.\n"
+)
 
-    last_err: Exception | None = None
-    for key_label, api_key in key_cands:
-        key_denied = False
-        for model_name in model_cands:
-            try:
-                def _gen(k=api_key, m=model_name):
-                    return _client_for_key(k).models.generate_content(model=m, contents=prompt)
 
-                resp = _call_with_retry(_gen, tries=3, base=1.5)
-                out = (resp.text or "").strip()
-                if not out:
-                    raise RuntimeError("empty polish")
-                new_title = title
-                new_body = out
-                if out.startswith("العنوان:") or "العنوان:" in out.split("\n", 1)[0]:
-                    first, _, rest = out.partition("\n")
-                    parsed = first.split(":", 1)[-1].strip()
-                    # Keep original hero title unless polish returned something usable
-                    if parsed:
-                        new_title = title  # hero title unchanged by contract
-                    new_body = rest.strip()
-                if "المصدر:" not in new_body and "المصدر:" in (body or ""):
-                    _, _, src_rest = body.rpartition("المصدر:")
-                    new_body = new_body.rstrip() + "\n\nالمصدر:" + src_rest
-                # Prefer polished only if it still passes gates (or is at least as long)
-                reasons = validate_story_quality(new_title, new_body, age_band)
-                if reasons:
-                    log.warning("polish rejected key=%s model=%s reasons=%s", key_label, model_name, reasons)
-                    continue
-                log.info(
-                    "polish ok key=%s model=%s body_words~%s",
-                    key_label,
-                    model_name,
-                    len(_story_body_main(new_body).split()),
-                )
-                return enforce_audio_budget(new_title, new_body, age_band)
-            except Exception as exc:
-                last_err = exc
-                msg = str(exc)
-                log.warning("polish soft-fail key=%s model=%s: %s", key_label, model_name, msg[:180])
-                if any(x in msg.upper() for x in ("403", "PERMISSION_DENIED", "API_KEY_INVALID", "CONSUMER_INVALID")):
-                    key_denied = True
-                    break
-                continue
-        if key_denied:
+def _names_block(used_names: list[str] | None) -> str:
+    shown: list[str] = []
+    for h in (used_names or [])[:300]:
+        clean = strip_tashkeel(str(h)).strip()
+        if clean and clean not in shown:
+            shown.append(clean)
+    if not shown:
+        return ""
+    return (
+        "- عند اختيار أسماء عربية للشخصيات، تجنّب هذه الأسماء المستخدمة في قصص سابقة لتتنوّع الأسماء: "
+        + "، ".join(shown) + ".\n"
+    )
+
+
+def _split_source_parts(text: str, target_words: int = CHUNK_WORDS) -> list[str]:
+    """Split source into sequential parts on paragraph (then sentence) boundaries."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip()]
+    units: list[str] = []
+    for para in paras:
+        if len(para.split()) <= target_words:
+            units.append(para)
             continue
-    log.warning("polish skipped after failures (last=%s); keeping finalize draft", str(last_err)[:160] if last_err else "none")
-    return title, body
+        sents = re.split(r"(?<=[.!?…»\"])\s+", para)
+        buf = ""
+        for sent in sents:
+            cand = f"{buf} {sent}".strip()
+            if buf and len(cand.split()) > target_words:
+                units.append(buf)
+                buf = sent
+            else:
+                buf = cand
+        if buf:
+            units.append(buf)
+    parts: list[str] = []
+    buf = ""
+    for u in units:
+        cand = f"{buf}\n\n{u}".strip() if buf else u
+        if buf and len(cand.split()) > target_words:
+            parts.append(buf)
+            buf = u
+        else:
+            buf = cand
+    if buf:
+        parts.append(buf)
+    return parts or [text]
 
 
-def finalize_kids_story(story: dict, age_band: str = "over8", genre: str = "animals", used_heroes: list[str] | None = None, extra_instruction: str = "") -> tuple[str, str]:
-    """Gemini final step: dramatic Arabic kids retelling WITH full tashkeel.
+def _parse_header(out: str) -> tuple[str, list[str], str]:
+    """Parse 'العنوان: …' / 'الأسماء: …' header lines; return (title, names, body)."""
+    title = ""
+    names: list[str] = []
+    lines = out.strip().splitlines()
+    body_start = 0
+    for i, ln in enumerate(lines[:6]):
+        clean = ln.strip().lstrip("#*").strip()
+        bare = strip_tashkeel(clean)
+        if bare.startswith("العنوان"):
+            title = clean.split(":", 1)[-1].strip().strip("*").strip()
+            body_start = i + 1
+        elif bare.startswith("الأسماء") or bare.startswith("الاسماء"):
+            raw = clean.split(":", 1)[-1]
+            names = [n.strip(" .،,") for n in re.split(r"[،,;؛]", raw) if n.strip(" .،,")]
+            names = [n for n in names if strip_tashkeel(n) not in ("لا يوجد", "لا توجد", "لا شيء", "-")]
+            body_start = i + 1
+    body = "\n".join(lines[body_start:]).strip()
+    if strip_tashkeel(body).startswith("النص:"):
+        body = body.split(":", 1)[-1].strip()
+    return title, names, body
 
-    Title MUST be the main hero/heroine Arabic name only.
-    used_heroes: blocklist of recently used hero names (do not reuse as titles).
-    Prefers an Arabic draft from prep when present; else source text.
-    Finalize keys: gemini-story → gemini-main → gemini-talking-mini.
-    """
-    age_line = (
-        "الفئة: دون السابعة — لغة بسيطة، جمل قصيرة، مغامرة خفيفة مع غموض لطيف يحفّز الانتباه، بدون عنف أو رعب مرعب."
-        if age_band == "under7"
-        else "الفئة: 8 سنوات فأكثر — مغامرة مشوّقة مع تشويق ورعب خفيف مناسب للأطفال (ظلال، أصوات، أسرار، مفاجآت) بدون دماء أو عنف قاسٍ أو محتوى مرعب للكبار."
+
+def _translate_part(
+    story: dict,
+    part_text: str,
+    idx: int,
+    total: int,
+    used_names: list[str] | None,
+    title_ar: str,
+    names_ar: list[str],
+    prev_tail: str,
+) -> tuple[str, list[str], str]:
+    first = idx == 1
+    header = (
+        "أنت مترجم أدبي أمين متخصص في نقل حكايات الأطفال العالمية إلى العربية الفصحى. "
+        "مهمتك ترجمة أمينة كاملة مع تعريب الأسماء والأماكن والثقافة فقط — لا إعادة كتابة.\n\n"
+        + _FIDELITY_RULES
     )
-    genre_map = {
-        "animals": "النوع: حكاية مغامرة على ألسنة الحيوانات مع تشويق.",
-        "legend": "النوع: أسطورة / حكاية عجيبة فيها سرّ أو لغز.",
-        "human": "النوع: قصة بشرية عن أولاد أو بنات في مغامرة.",
-        "history": "النوع: قصة تاريخية مبسطة للأطفال بطابع مغامرة.",
-    }
-    genre_line = genre_map.get(genre, "النوع: قصة أطفال مغامرة متنوعة.")
-    length_line = (
-        "اجعل النص حوالي 180–320 كلمة عربية بحيث يكون الإلقاء الصوتي بين 3 و5 دقائق تقريباً."
-        if age_band == "under7"
-        else "اجعل النص حوالي 320–580 كلمة عربية بحيث يكون الإلقاء الصوتي بين 3 و6 دقائق (فضّل 4–6)."
-    )
-    draft = (story.get("arabic_draft") or "").strip()
-    draft_title = (story.get("arabic_draft_title") or "").strip()
-    if draft:
-        log.info("gemini finalize from arabic_draft (pre models: extract=%s rewrite=%s translate=%s)",
-                 story.get("extract_model"), story.get("rewrite_model"), story.get("translate_model"))
-        source_block = (
-            f"مسودة عربية جاهزة (بدون تشكيل كامل بالضرورة) — أعد صياغتها دراميًا مع تشكيل كامل:\n"
-            f"عنوان المسودة: {draft_title or story.get('title_en', '')}\n\n"
-            f"{draft}\n"
+    if first:
+        fmt = (
+            "\nصيغة الإخراج:\n"
+            "- السطر الأول: العنوان: ثم ترجمة عربية أمينة للعنوان الأصلي مشكّلة (ترجم العنوان كما هو؛ "
+            "استبدل فقط أي اسم شخص فيه بالاسم العربي نفسه المستخدم في النص — لا تجعل العنوان اسم البطل إن لم يكن كذلك في الأصل).\n"
+            "- السطر الثاني: الأسماء: ثم الأسماء العربية التي اخترتها للشخصيات مفصولة بفاصلة (أو: لا يوجد).\n"
+            "- ثم سطر فارغ ثم الترجمة المشكّلة كاملة.\n"
         )
-        transform_line = (
-            "أنت كاتب قصص أطفال عربي محترف. حوّل المسودة العربية التالية إلى رواية نهائية "
-            "فصحى مشكّلة بالكامل (تَشْكِيل على كل كلمة)، بأسلوب مغامرة وتشويق خفيف.\n"
-        )
+        fmt += _names_block(used_names)
     else:
-        log.info("gemini finalize from source text (no arabic_draft; classic arabize)")
-        source_block = (
-            f"العنوان الأصلي: {story['title_en']}\n"
-            f"المصدر: {story['source']}\n\n"
-            f"النص:\n{story['text_en']}\n"
+        fmt = (
+            "\nهذا جزء لاحق من الحكاية نفسها. ترجم هذا الجزء فقط بالكامل، متابعاً مباشرة من حيث انتهى الجزء السابق، "
+            "ولا تُعد ترجمة ما سبق ولا تضف خاتمة من عندك.\n"
+            f"- العنوان العربي المعتمد: {title_ar}\n"
+            + (f"- استخدم الأسماء العربية نفسها المعتمدة: {'، '.join(names_ar)}\n" if names_ar else "")
+            + (f"- آخر ما تُرجم من الجزء السابق (للسياق فقط، لا تكرره):\n{prev_tail}\n" if prev_tail else "")
+            + "- صيغة الإخراج: نص الترجمة المشكّلة فقط بلا عنوان ولا مقدمات.\n"
         )
-        transform_line = (
-            "أنت كاتب قصص أطفال عربي محترف متخصص في المغامرات والتشويق والتفاعل اللطيف.\n"
-            "حوّل النص الأصلي التالي (أي لغة) إلى قصة عربية فصحى بسيطة عالية الجودة تناسب الأطفال، بمغامرة حسية وحوار نشط وتفاعل خفيف مع المستمع، مع تعريب كامل:\n"
-        )
+    part_label = f"الجزء {idx} من {total}" if total > 1 else "النص الكامل"
     prompt = (
-        transform_line
-        + f"- {age_line}\n"
-        + f"- {genre_line}\n"
-        + f"- {length_line}\n"
-        + "- اكتب بأسلوب مشوّق تفاعلي: بداية جذّابة فوراً، تصاعد مغامرة، محطات تشويق قصيرة (cliffhangers)، "
-        "ذروة واضحة، ثم نهاية مطمئنة دافئة.\n"
-        + "- مهم: ابنِ حبكة فريدة مستمدة من النص الأصلي — لا تستخدم قالب صحراء/واحة عام مكرر، "
-        "ولا حكاية نمطية عن عطش وريح. أسماء عربية أصيلة وتفاصيل خاصة بالمصدر.\n"
-        + "- زِد المغامرة والتشويق الخفيف المناسب للأطفال: أسرار، طرق ملتوية، أصوات بعيدة، ظلال، أبواب تُطرق، "
-        "خرائط ناقصة، مفاجآت لطيفة — بلا دماء ولا عنف قاسٍ ولا رعب مرعب.\n"
-        + "- تفاصيل حسية حيّة (ماذا يُرى/يُسمع/يُشم/يُلمس) وحوار نشط قصير بين الشخصيات يحرّك الحدث.\n"
-        + "- تفاعلية خفيفة مع الطفل المستمع دون تحويل القصة إلى اختبار أو ألعاب أسئلة: "
-        "سؤال بلاغي واحد أو اثنان مثل «ماذا سيحدث؟» أو «هل تتخيّل ما وراء الباب؟»، "
-        "ودعوات قصيرة للتخيّل، ثم عُد فوراً إلى السرد.\n"
-        + "- لا تكسر الإيقاع بسرد طويل من التعليمات؛ اجعل التفاعل جزءاً من الحكاية نفسها.\n"
-        + "- غيّر الأسماء والشخصيات والأماكن والطابع إلى بيئة عربية أصيلة "
-        "(مثل: سارة، يوسف، نورة، خالد، بغداد، دمشق، قرية النخيل...) ولا تُبقِ أسماء أجنبية.\n"
-        + "- اجعل الأجواء عربية خالصة مع عبرة واضحة في الخاتمة.\n"
-        + "- اكتب فصحى بسيطة مضبوطة لغوياً ونحوياً، مع تشكيل كامل (تَشْكِيل) على كل الكلمات "
-        "في العنوان ونص القصة (الحركات: فتحة، ضمة، كسرة، سكون، تنوين، شدة).\n"
-        + "- لا تستخدم إيموجي ولا عناوين فرعية كثيرة.\n"
-        + "- مهم جداً: العنوان = اسم البطل أو البطلة فقط بالعربية (مثل: سارة، يوسف، نورة، خالد) "
-        "أو صيغة قصيرة باسم البطل مثل «يوسف والصياد» إذا لزم — فضّل اسماً شخصياً واضحاً معرّباً.\n"
-        + "- لا تجعل العنوان وصفاً عاماً (مثل حكاية القرية / رحلة الصحراء) — يجب أن يكون اسم البطل/البطلة.\n"
-        + "- في السطر الأول فقط اكتب: العنوان: ثم اسم البطل/البطلة مع التشكيل الكامل.\n"
-        + "- ثم سطر فارغ ثم نص القصة مشكّلاً بالكامل.\n"
-        + "- في آخر سطر: المصدر: ثم اسم المصدر كما هو.\n"
+        header
+        + fmt
+        + f"\nالعنوان الأصلي: {story.get('title_en', '')}\n"
+        + f"المصدر: {story.get('source', '')}\n\n"
+        + f"{part_label} (اللغة الأصلية):\n{part_text}\n"
     )
-    heroes = [h.strip() for h in (used_heroes or []) if h and str(h).strip()]
-    if heroes:
-        # Pass display names; strip tashkeel for compactness in blocklist
-        shown = []
-        for h in heroes[:400]:
-            clean = strip_tashkeel(h).strip()
-            if clean and clean not in shown:
-                shown.append(clean)
-        if shown:
-            prompt += (
-                "- لا تستخدم هذه الأسماء للعناوين/الأبطال (مستخدمة سابقاً): "
-                + "، ".join(shown)
-                + ".\n"
-                + "- اختر اسماً عربياً جديداً وغير مكرر للبطل/البطلة.\n"
+    out, used = _generate_text(prompt, purpose=f"translate part {idx}/{total}")
+    if first:
+        t, names, body = _parse_header(out)
+    else:
+        t, names, body = "", [], _parse_header(out)[2] or out
+    log.info(
+        "translate part %s/%s via %s src_words=%s ar_words=%s",
+        idx, total, used, len(part_text.split()), len(_arabic_words(body)),
+    )
+    return t, names, body
+
+
+def translate_faithful(
+    story: dict,
+    used_names: list[str] | None = None,
+    force_chunked: bool = False,
+    chunk_words: int = CHUNK_WORDS,
+) -> tuple[str, list[str], str]:
+    """Faithful complete Arabic translation (full tashkeel). Long sources → sequential parts."""
+    src = (story.get("text_en") or "").strip()
+    words = len(src.split())
+    if force_chunked or words > SINGLE_PASS_MAX_WORDS:
+        parts = _split_source_parts(src, chunk_words)
+    else:
+        parts = [src]
+    title_ar, names_ar, bodies = "", [], []
+    for i, part in enumerate(parts, start=1):
+        prev_tail = " ".join(bodies[-1].split()[-60:]) if bodies else ""
+        t, names, body = _translate_part(
+            story, part, i, len(parts), used_names, title_ar, names_ar, prev_tail
+        )
+        if i == 1:
+            title_ar, names_ar = t, names
+        part_ratio = len(_arabic_words(body)) / max(len(part.split()), 1)
+        if part_ratio < min_ratio_for(story):
+            log.warning("part %s/%s short (ratio %.2f); retrying this part once", i, len(parts), part_ratio)
+            t2, names2, body2 = _translate_part(
+                story, part, i, len(parts), used_names, title_ar, names_ar, prev_tail
             )
-    if extra_instruction:
-        prompt += f"- {extra_instruction.strip()}\n"
-    prompt += (
-        "\n"
-        + f"المصدر الأصلي للموقع: {story.get('source', '')}\n\n"
-        + source_block
+            if len(_arabic_words(body2)) > len(_arabic_words(body)):
+                body = body2
+                if i == 1:
+                    title_ar, names_ar = t2 or title_ar, names2 or names_ar
+        bodies.append(body.strip())
+    return title_ar, names_ar, "\n\n".join(bodies)
+
+
+def verify_fidelity(story: dict, body_ar: str) -> dict | None:
+    """Ask Gemini to compare source vs translation. None if the check could not run."""
+    prompt = (
+        "You are a strict translation auditor. Compare the ORIGINAL story with its ARABIC translation. "
+        "Arabization of names, places, foods and cultural items is ALLOWED and is not an error. "
+        "Report as errors: any omitted event/scene/sentence, omitted or shortened repetitions/refrains, "
+        "added events/dialogue/suspense not in the original, and any changed or softened ending.\n"
+        "Reply with ONLY a JSON object: "
+        '{"complete": true|false, "ending_preserved": true|false, "refrains_preserved": true|false, '
+        '"missing": ["..."], "added": ["..."], "ending_original": "...", "ending_translation": "..."}\n\n'
+        f"ORIGINAL ({story.get('title_en', '')}):\n{story.get('text_en', '')}\n\n"
+        f"ARABIC TRANSLATION:\n{strip_tashkeel(_story_body_main(body_ar))}\n"
     )
-    key_cands = _finalize_key_candidates()
-    model_cands = _text_model_candidates()
-    if not key_cands:
-        log.error("Gemini finalize: no API keys configured; refusing local template send")
-        raise RuntimeError("Gemini finalize: no API keys configured")
+    try:
+        out, used = _generate_text(prompt, purpose="fidelity verify", tries=3)
+    except Exception as exc:
+        log.warning("fidelity verify unavailable: %s", str(exc)[:160])
+        return None
+    m = re.search(r"\{.*\}", out, re.S)
+    if not m:
+        log.warning("fidelity verify: no JSON in reply")
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        log.warning("fidelity verify: bad JSON")
+        return None
+    data["_via"] = used
+    return data
 
-    last_err: Exception | None = None
-    for key_label, api_key in key_cands:
-        # Permanent key/project denial: skip remaining models for this key quickly.
-        key_denied = False
-        for model_name in model_cands:
-            try:
-                def _gen(k=api_key, m=model_name):
-                    return _client_for_key(k).models.generate_content(model=m, contents=prompt)
 
-                resp = _call_with_retry(_gen, tries=4, base=2.0)
-                out = (resp.text or "").strip()
-                if not out:
-                    raise RuntimeError("empty finalized story")
-                title = draft_title or story.get("title_en", "")
-                body = out
-                if out.startswith("العنوان:") or "العنوان:" in out.split("\n", 1)[0]:
-                    first, _, rest = out.partition("\n")
-                    title = first.split(":", 1)[-1].strip()
-                    body = rest.strip()
-                if "المصدر:" not in body:
-                    body = body + f"\n\nالمصدر: {story['source']}"
-                log.info(
-                    "finalize ok key=%s model=%s title_chars=%s body_words~%s",
-                    key_label,
-                    model_name,
-                    len(title),
-                    len(body.split()),
-                )
-                return enforce_audio_budget(title, body, age_band)
-            except Exception as exc:
-                last_err = exc
-                msg = str(exc)
-                log.warning(
-                    "finalize soft-fail key=%s model=%s: %s",
-                    key_label,
-                    model_name,
-                    msg[:200],
-                )
-                # 403 / project denied / invalid key → skip other models on this key
-                if any(
-                    x in msg.upper()
-                    for x in ("403", "PERMISSION_DENIED", "API_KEY_INVALID", "CONSUMER_INVALID")
-                ):
-                    key_denied = True
-                    break
-                # 404 / NOT_FOUND on model → try next model
-                continue
-        if key_denied:
+def _verify_ok(v: dict | None) -> bool:
+    if v is None:
+        return True  # verifier unavailable → rely on the length-ratio gate
+    return bool(v.get("complete", True)) and bool(v.get("ending_preserved", True))
+
+
+def tashkeel_pass(body: str) -> str:
+    """Language-only pass: add missing diacritics. Must not change any word.
+
+    Rejected unless the undiacritized text is unchanged (within 2% words).
+    No plot, suspense, dialogue or length changes are allowed here.
+    """
+    parts = _split_tts_chunks(body, limit=3500)
+    out_parts: list[str] = []
+    for i, part in enumerate(parts, 1):
+        prompt = (
+            "أضف التشكيل الكامل إلى النص العربي التالي وصحّح الأخطاء الإملائية والنحوية الطفيفة فقط. "
+            "ممنوع منعاً باتاً حذف أي كلمة أو جملة أو إضافة أي محتوى أو حوار أو تشويق أو تغيير أي حدث أو ترتيب. "
+            "أعد النص نفسه مشكّلاً فقط، بلا مقدمات.\n\n" + part
+        )
+        try:
+            out, _ = _generate_text(prompt, purpose=f"tashkeel {i}/{len(parts)}", tries=3)
+        except Exception as exc:
+            log.warning("tashkeel pass skipped part %s: %s", i, str(exc)[:120])
+            out_parts.append(part)
             continue
-
-    log.error(
-        "Gemini finalize: all keys/models failed (last=%s); refusing local template send",
-        str(last_err)[:180] if last_err else "none",
-    )
-    raise RuntimeError(
-        f"Gemini finalize failed for all keys/models: {last_err}"
-    ) from last_err
-
-
-def _disambiguate_hero_title(title: str, body: str, blocked_keys: set[str]) -> str:
-    """Append a distinguishing plot/place word so the hero title key is unique."""
-    from .store import normalize_hero_name
-
-    base = (title or "").strip() or "بطل"
-    # Prefer Arabic tokens that look like places/roles (length >= 3 letters)
-    candidates: list[str] = []
-    for w in re.findall(r"[\u0600-\u06FF]{3,}", body or ""):
-        clean = strip_tashkeel(w)
-        stop = {
-            "المصدر", "كان", "كانت", "قالت", "قال", "هذه", "هذا", "هؤلاء",
-            "التي", "الذي", "الذين", "على", "إلى", "الي", "من", "في", "عن",
-            "مع", "ثم", "بعد", "قبل", "كل", "بعض", "غير", "بين", "حتى",
-            "لم", "لن", "ما", "لا", "إن", "ان", "أن", "او", "أو", "إذا",
-            "ذلك", "تلك", "هناك", "هنا", "جدا", "ايضا", "أيضا", "وقد", "فقد",
-            "وهو", "وهي", "فهم", "فهي", "انهم", "انها", "قصة", "الحكاية",
-        }
-        if clean in stop or len(clean) < 3:
-            continue
-        if clean and clean not in candidates:
-            candidates.append(clean)
-        if len(candidates) >= 40:
-            break
-    # Prefer place-ish tokens later in shortlist; try several suffixes
-    for suffix in candidates:
-        cand = f"{strip_tashkeel(base).split()[0] if base else 'بطل'} و{suffix}"
-        # Keep some tashkeel-free short form; if base had tashkeel, keep base + suffix
-        cand_display = f"{base} و{suffix}"
-        if normalize_hero_name(cand_display) not in blocked_keys:
-            return cand_display
-    # Last resort: numeric-ish distinguisher from body length
-    n = (len(body or "") % 97) + 2
-    return f"{base} والقصة{n}"
+        a = len(strip_tashkeel(part).split())
+        b = len(strip_tashkeel(out).split())
+        if a and abs(b - a) / a <= 0.02:
+            out_parts.append(out.strip())
+        else:
+            log.warning("tashkeel pass rejected part %s (words %s→%s)", i, a, b)
+            out_parts.append(part)
+    return "\n\n".join(out_parts)
 
 
 def arabize_story(
     story: dict,
     age_band: str = "over8",
-    genre: str = "animals",
+    genre: str = "legend",
     used_heroes: list[str] | None = None,
-) -> tuple[str, str]:
-    """Prep + Gemini finalize + quality gates + polish; never ship local template.
+) -> tuple[str, str, dict]:
+    """Clean source → faithful translation → fidelity gates (+retry chunked) → tashkeel.
 
-    Raises StoryQualityError / RuntimeError if output cannot meet gates — caller
-    should pick another source story (up to 3 attempts per send).
+    Returns (title_ar, body_ar, meta). title_ar is a faithful translation of the
+    ORIGINAL title (personal names arabized). Raises StoryQualityError if the
+    translation cannot be made complete — caller picks another source.
     """
-    from .store import normalize_hero_name
-
     try:
         from .ai_pipeline import prepare_story_for_gemini
 
         story = prepare_story_for_gemini(story, age_band=age_band, genre=genre)
     except Exception:
-        log.exception("ai_pipeline prepare failed; continuing with raw story to Gemini")
+        log.exception("ai_pipeline prepare failed; continuing with scraped story text")
 
-    blocked = {normalize_hero_name(h) for h in (used_heroes or []) if h}
+    src_words = len((story.get("text_en") or "").split())
+    if not src_words:
+        raise StoryQualityError("empty source text")
+    floor = min_ratio_for(story)
+    meta: dict = {"source_words": src_words, "attempts": [], "min_ratio": floor}
 
-    def _finalize_once(extra: str = "") -> tuple[str, str]:
-        return finalize_kids_story(
-            story,
-            age_band=age_band,
-            genre=genre,
-            used_heroes=used_heroes,
-            extra_instruction=extra,
-        )
-
-    title, body = _finalize_once()
-    key = normalize_hero_name(title)
-    if not key or key in blocked:
-        log.warning("hero title collision or empty (%s); retrying finalize once", (title or "")[:40])
-        title2, body2 = _finalize_once(
-            "يجب اختيار اسم بطل/بطلة عربي جديد تماماً وغير موجود في قائمة الأسماء المستخدمة. "
-            "لا تكرر الاسم السابق. العنوان = الاسم فقط."
-        )
-        key2 = normalize_hero_name(title2)
-        if key2 and key2 not in blocked:
-            title, body = title2, body2
-        else:
-            title = _disambiguate_hero_title(title2 or title, body2 or body, blocked)
-            body = body2 or body
-            log.warning("hero title still colliding; disambiguated to %s", title[:60])
-
-    # Hard quality gates — never send template junk or too-short flat text
-    reasons = validate_story_quality(title, body, age_band)
-    if reasons:
-        log.warning(
-            "quality gate fail after finalize reasons=%s body_words~%s; re-finalize once",
-            reasons,
-            len(_story_body_main(body).split()),
-        )
-        lengthen = ""
-        if any(r.startswith("short_body") for r in reasons):
-            lengthen = "أطل النص وزد التشويق"
-        dialogue = ""
-        if "missing_dialogue_cue" in reasons:
-            dialogue = "أضف حواراً نشطاً واضحاً (قال/قالت أو «…») وسؤالاً بلاغياً خفيفاً."
-        anti_tmpl = ""
-        if "local_template_fingerprint" in reasons:
-            anti_tmpl = "لا تستخدم قالباً عاماً؛ ابنِ أحداثاً خاصة من المصدر."
-        title, body = _finalize_once(
-            " ".join(
-                x
-                for x in (
-                    lengthen,
-                    dialogue,
-                    anti_tmpl,
-                    "اجعل الحبكة فريدة حسية مع نهاية دافئة، وعنوان البطل كما هو إن أمكن.",
-                )
-                if x
+    best: tuple[str, list[str], str] | None = None
+    verdict: dict | None = None
+    plans = [
+        ("auto", False, CHUNK_WORDS),
+        ("chunked", True, CHUNK_WORDS),
+        ("chunked-small", True, max(150, CHUNK_WORDS // 2)),
+    ]
+    for label, chunked, cw in plans:
+        try:
+            title, names, body = translate_faithful(
+                story, used_names=used_heroes, force_chunked=chunked, chunk_words=cw
             )
+        except RuntimeError as exc:
+            meta["attempts"].append({"plan": label, "error": str(exc)[:160]})
+            log.warning("translate plan=%s failed: %s", label, str(exc)[:160])
+            continue
+        if not title:
+            title = story.get("title_en", "")
+        reasons = validate_story_quality(title, body, src_words, min_ratio=floor)
+        ratio = fidelity_ratio(body, src_words)
+        attempt = {"plan": label, "ratio": round(ratio, 2), "reasons": reasons}
+        log.info(
+            "fidelity plan=%s src_words=%s ar_words=%s ratio=%.2f reasons=%s",
+            label, src_words, arabic_word_count(body), ratio, reasons,
         )
-        reasons = validate_story_quality(title, body, age_band)
         if reasons:
-            log.error(
-                "quality gate still failing reasons=%s body_words~%s — discard story",
-                reasons,
-                len(_story_body_main(body).split()),
-            )
-            raise StoryQualityError(
-                f"story failed quality gates: {reasons} body_words~{len(_story_body_main(body).split())}"
-            )
-
-    # Second pass: polish for suspense / vivid scenes / dialogue (best-effort)
-    try:
-        title, body = polish_kids_story(title, body, age_band=age_band, genre=genre)
-    except Exception:
-        log.exception("polish pass crashed; keeping finalize draft")
-
-    # Final gate after polish (polish may have been skipped)
-    reasons = validate_story_quality(title, body, age_band)
-    if reasons:
-        raise StoryQualityError(
-            f"story failed quality gates after polish: {reasons} "
-            f"body_words~{len(_story_body_main(body).split())}"
+            meta["attempts"].append(attempt)
+            if best is None or arabic_word_count(body) > arabic_word_count(best[2]):
+                best = (title, names, body)
+            continue
+        verdict = verify_fidelity(story, body)
+        attempt["verify"] = (
+            {k: verdict.get(k) for k in ("complete", "ending_preserved", "refrains_preserved", "missing", "added")}
+            if verdict else None
         )
+        meta["attempts"].append(attempt)
+        log.info("fidelity verify plan=%s verdict=%s", label, attempt["verify"])
+        if _verify_ok(verdict):
+            best = (title, names, body)
+            break
+        verdict = None
+    else:
+        raise StoryQualityError(f"faithful translation failed all plans: {meta['attempts']}")
 
-    log.info(
-        "arabize ok hero_title=%s body_words~%s age=%s",
-        (title or "")[:80],
-        len(_story_body_main(body).split()),
-        age_band,
+    title, names, body = best
+
+    dens = tashkeel_density(_story_body_main(body))
+    if dens < 0.5:
+        log.info("tashkeel density %.2f < 0.5 → language-only tashkeel pass", dens)
+        body = tashkeel_pass(body)
+    meta.update(
+        names=names,
+        arabic_words=arabic_word_count(body),
+        ratio=round(fidelity_ratio(body, src_words), 2),
+        tashkeel_density=round(tashkeel_density(_story_body_main(body)), 2),
+        verify=verdict,
     )
-    return title, body
+    log.info(
+        "arabize ok title_ar=%s names=%s src_words=%s ar_words=%s ratio=%.2f ending_preserved=%s",
+        title[:80], names[:6], src_words, meta["arabic_words"], meta["ratio"],
+        (verdict or {}).get("ending_preserved", "unverified"),
+    )
+    return title, body, meta
 
+
+# ---------------------------------------------------------------------------
+# TTS (Aoede only). Long text is split into ordered parts — never shortened.
+# ---------------------------------------------------------------------------
 
 def _spoken_body(narration: str) -> str:
-    spoken_body = narration
-    if "المصدر:" in spoken_body:
-        spoken_body = spoken_body.split("المصدر:")[0].strip()
+    spoken_body = _story_body_main(narration)
     spoken_body = spoken_body.replace("العنوان:", "").strip()
     return spoken_body
 
@@ -770,52 +703,89 @@ def synthesize_pcm(narration: str, voice: str | None = None) -> tuple[bytes, int
     raise last_err or RuntimeError("tts failed")
 
 
-def _split_chunks(body: str, limit: int = 1400) -> list[str]:
-    chunks: list[str] = []
-    buf = ""
-    for para in body.split("\n\n"):
+
+
+def _split_tts_chunks(body: str, limit: int = 3000) -> list[str]:
+    """Split on paragraph, then sentence, boundaries (never mid-word)."""
+    units: list[str] = []
+    for para in re.split(r"\n\s*\n", body or ""):
         para = para.strip()
         if not para:
             continue
-        cand = (buf + "\n\n" + para).strip() if buf else para
-        if len(cand) <= limit:
-            buf = cand
-        else:
-            if buf:
-                chunks.append(buf)
-            if len(para) <= limit:
-                buf = para
+        if len(para) <= limit:
+            units.append(para)
+            continue
+        sents = re.split(r"(?<=[.!؟?…»:])\s+", para)
+        buf = ""
+        for sent in sents:
+            cand = f"{buf} {sent}".strip()
+            if buf and len(cand) > limit:
+                units.append(buf)
+                buf = sent
             else:
-                for i in range(0, len(para), limit):
-                    chunks.append(para[i : i + limit])
-                buf = ""
+                buf = cand
+        while len(buf) > limit:  # pathological: no punctuation at all
+            cut = buf.rfind(" ", 0, limit)
+            cut = cut if cut > 0 else limit
+            units.append(buf[:cut].strip())
+            buf = buf[cut:].strip()
+        if buf:
+            units.append(buf)
+    chunks: list[str] = []
+    buf = ""
+    for u in units:
+        cand = f"{buf}\n\n{u}" if buf else u
+        if buf and len(cand) > limit:
+            chunks.append(buf)
+            buf = u
+        else:
+            buf = cand
     if buf:
         chunks.append(buf)
-    if not chunks:
-        chunks = [body[:limit] or body]
-    return chunks
+    return chunks or [body]
 
 
-def synthesize_long(narration: str, voice: str | None = None) -> tuple[bytes, int]:
-    """Prefer one TTS call for the whole story; chunk only if needed.
+TTS_CHUNK_CHARS = 3000          # per Gemini TTS call (keeps calls well under limits)
+VOICE_MAX_SECONDS = 12 * 60     # group consecutive chunks into voice messages up to this
 
-    Always uses Aoede + the same TTS_INSTRUCTION — never switch voice mid-story.
+
+def synthesize_parts(narration: str, voice: str | None = None) -> list[tuple[bytes, int]]:
+    """Synthesize the FULL story with Aoede in ordered chunks.
+
+    Returns a list of voice messages (pcm, rate) to send in order. Each voice
+    groups consecutive chunks up to VOICE_MAX_SECONDS. Text is never shortened.
     """
     voice_name = voice or TTS_VOICE
     body = _spoken_body(narration)
-
-    # Prefer a single call for stable pitch across the clip.
-    try:
-        log.info("tts single-call chars=%s voice=%s", len(body), voice_name)
-        return synthesize_pcm(body, voice_name)
-    except Exception as exc:
-        log.warning("tts single-call failed (%s); falling back to chunks with same voice", str(exc)[:160])
-
-    chunks = _split_chunks(body, limit=1400)
-    pcm_all = b""
+    chunks = _split_tts_chunks(body, limit=TTS_CHUNK_CHARS)
+    voices: list[tuple[bytes, int]] = []
+    cur = b""
     rate = 24000
-    for i, ch in enumerate(chunks):
-        log.info("tts chunk %s/%s chars=%s voice=%s", i + 1, len(chunks), len(ch), voice_name)
+    for i, ch in enumerate(chunks, 1):
+        words = len(ch.split())
+        log.info("tts chunk %s/%s chars=%s words=%s voice=%s", i, len(chunks), len(ch), words, voice_name)
         pcm, rate = synthesize_pcm(ch, voice_name)
-        pcm_all += pcm
-    return pcm_all, rate
+        secs = len(pcm) / (2 * rate)
+        # Truncated audio guard: Arabic narration is ~1.5–2.5 words/s.
+        if words >= 20 and secs < words / 4.0:
+            log.warning("tts chunk %s looks truncated (%.0fs for %s words); retrying once", i, secs, words)
+            pcm2, rate2 = synthesize_pcm(ch, voice_name)
+            if len(pcm2) > len(pcm):
+                pcm, rate = pcm2, rate2
+                secs = len(pcm) / (2 * rate)
+        cur_secs = len(cur) / (2 * rate)
+        if cur and cur_secs + secs > VOICE_MAX_SECONDS:
+            voices.append((cur, rate))
+            cur = b""
+        cur += pcm
+    if cur:
+        voices.append((cur, rate))
+    log.info("tts done chunks=%s voices=%s total_sec=%.0f", len(chunks), len(voices),
+             sum(len(p) / (2 * r) for p, r in voices))
+    return voices
+
+
+def synthesize_long(narration: str, voice: str | None = None) -> tuple[bytes, int]:
+    """Back-compat: whole story as one PCM clip (all parts concatenated in order)."""
+    voices = synthesize_parts(narration, voice)
+    return b"".join(p for p, _ in voices), voices[0][1]

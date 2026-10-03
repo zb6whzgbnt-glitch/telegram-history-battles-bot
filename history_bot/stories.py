@@ -168,10 +168,16 @@ def _guess_genre(title: str, text: str) -> str:
     return best
 
 
+# Source-length policy (stories are NEVER cut; we choose naturally sized sources).
+PICK_MAX_WORDS = 1500          # moderate length keeps audio reasonable
+UNDER7_MAX_WORDS = 500         # under-7: naturally short source tales only
+UNDER7_FALLBACK_MAX = 700      # used only if no <=500-word tale is available
+
+
 def _fits_age(words: int, age_band: str) -> bool:
     if age_band == "under7":
-        return 100 <= words <= 450
-    return 200 <= words <= 900
+        return 80 <= words <= UNDER7_MAX_WORDS
+    return 250 <= words <= 1200
 
 
 def _looks_like_ocr_junk(text: str) -> bool:
@@ -213,6 +219,117 @@ def _is_quality_story(title: str, body: str, min_words: int = 130, max_words: in
     return True
 
 
+# ---------------------------------------------------------------------------
+# Tale type (genre card) — derived from the SOURCE story, never from rotation.
+# ---------------------------------------------------------------------------
+
+TALE_TYPE_AR = {
+    "cumulative": "حكاية تراكمية",
+    "fable": "حكاية على لسان الحيوان",
+    "fairy": "حكاية خرافية",
+    "legend": "أسطورة",
+    "literary": "حكاية أدبية",
+    "folk": "حكاية شعبية",
+    "historical": "حكاية تاريخية",
+}
+
+_ANIMAL_WORDS = (
+    "fox", "wolf", "lion", "mouse", "crow", "hare", "tortoise", "cat", "dog", "bear",
+    "pig", "hen", "cock", "rooster", "goat", "sheep", "frog", "ant", "grasshopper",
+    "monkey", "donkey", "ass", "horse", "cow", "bird", "rabbit", "duck", "goose",
+    "renard", "loup", "lion", "souris", "corbeau", "lièvre", "tortue", "chat",
+    "лиса", "лис", "волк", "медвед", "заяц", "кот", "мыш", "петух", "курочк", "ворон", "коз",
+    "zorro", "lobo", "león", "ratón", "cuervo", "liebre", "tortuga", "gato", "perro",
+)
+_HUMAN_WORDS = (
+    "man", "woman", "king", "queen", "prince", "princess", "girl", "boy", "farmer",
+    "wife", "husband", "mother", "father", "son", "daughter", "old man", "old woman",
+    "roi", "reine", "fille", "garçon", "homme", "femme",
+    "царь", "царев", "дед", "баба", "старик", "старух", "девоч", "мальчик",
+    "rey", "reina", "niña", "niño", "hombre", "mujer",
+)
+_MAGIC_WORDS = (
+    "fairy", "fairies", "magic", "enchant", "witch", "wizard", "giant", "ogre", "dragon",
+    "spell", "godmother", "troll", "elf", "elves", "goblin", "mermaid", "genie",
+    "fée", "sorci", "magique", "ogre", "géant",
+    "колдун", "волшеб", "ведьм", "кощей", "яга", "змей", "чудо",
+    "hada", "bruja", "mago", "gigante", "dragón", "hechiz", "encant",
+)
+
+
+def _count_hits(blob: str, words: tuple[str, ...]) -> int:
+    n = 0
+    for w in words:
+        if w.isascii():
+            pat = r"\b" + re.escape(w) + r"(?:s|es)?\b"
+        else:
+            pat = r"(?<![\w])" + re.escape(w)  # stem/prefix match (ru/fr/es inflections)
+        n += len(re.findall(pat, blob))
+    return n
+
+
+def _norm_line(ln: str) -> str:
+    return re.sub(r"[^\w\s]", "", ln).strip().lower()
+
+
+def _is_cumulative(text: str) -> bool:
+    """Cumulative tale: a refrain repeats >=3 times AND its block GROWS each time
+    (Gingerbread Man, The Mitten, The House that Jack Built). A fixed refrain
+    that does not grow (Rapunzel's call) is not cumulative."""
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", text or "") if b.strip()]
+    sentences: list[tuple[int, str]] = []
+    for bi, b in enumerate(blocks):
+        for ln in re.split(r"[\n.!?]+", b):
+            n = _norm_line(ln)
+            if len(n.split()) >= 3:
+                sentences.append((bi, n))
+    occ: dict[str, list[int]] = defaultdict(list)
+    for bi, n in sentences:
+        if not occ[n] or occ[n][-1] != bi:
+            occ[n].append(bi)
+    for n, bis in occ.items():
+        if len(bis) < 3:
+            continue
+        sizes = [len(blocks[i].split()) for i in bis]
+        nxt = [len(blocks[i + 1].split()) if i + 1 < len(blocks) else 0 for i in bis]
+        for seq in (sizes, nxt):
+            grows = sum(1 for a, b in zip(seq, seq[1:]) if b > a)
+            if grows >= 2 and grows >= (len(seq) - 1) * 0.6:
+                return True
+    return False
+
+
+def classify_tale_type(story: dict) -> str:
+    """Return a TALE_TYPE_AR key based on source + content (never rotation)."""
+    title = (story.get("title_en") or "").lower()
+    text = (story.get("text_en") or "")
+    src = (story.get("source") or "").lower()
+    blob = f"{title}\n{text}".lower()
+    if re.search(r"(?i)\b(historical|true story|history of|chronicle)\b|histoire vraie|historia real|быль\b", title):
+        return "historical"
+    if re.search(r"(?i)\b(legend|myth)\b|légende|leyenda|mito\b|легенд|миф", title):
+        return "legend"
+    if _is_cumulative(text):
+        return "cumulative"
+    if "aesop" in src or "fable" in title or "fábula" in title or "басн" in title:
+        return "fable"
+    animals = _count_hits(blob, _ANIMAL_WORDS)
+    humans = _count_hits(blob, _HUMAN_WORDS)
+    magic = _count_hits(blob, _MAGIC_WORDS)
+    if animals >= 4 and animals > humans * 1.5:
+        return "fable"
+    if "andersen" in src:
+        return "literary" if magic < 2 else "fairy"
+    if magic >= 2:
+        return "fairy"
+    return "folk"
+
+
+def tale_type_label(story: dict) -> str:
+    key = story.get("tale_type") or classify_tale_type(story)
+    return TALE_TYPE_AR.get(key, TALE_TYPE_AR["folk"])
+
+
 def _story(
     source_key: str,
     source_label: str,
@@ -225,7 +342,7 @@ def _story(
     title = _clean(title) or "Untitled"
     if not _is_quality_story(title, body):
         return None
-    return {
+    out = {
         "id": _id(source_key, title),
         "title_en": title,
         "source": source_label,
@@ -234,6 +351,8 @@ def _story(
         "genre": genre or _guess_genre(title, body),
         "words": _word_count(body),
     }
+    out["tale_type"] = classify_tale_type(out)
+    return out
 
 
 def _extract_article_text(soup: BeautifulSoup, selectors: list[str] | None = None) -> str:
@@ -282,6 +401,62 @@ def _extract_article_text(soup: BeautifulSoup, selectors: list[str] | None = Non
 # Primary scrapers
 # ---------------------------------------------------------------------------
 
+def _surlalune_tale_text(soup: BeautifulSoup) -> str:
+    """Extract the COMPLETE tale from a SurLaLune annotated page.
+
+    Keeps every paragraph AND every <blockquote> refrain/verse (cumulative
+    rhymes live in blockquotes, often without <p>), keeps short lines, strips
+    annotation footnote numbers, and stops before trailing notes/footer.
+    """
+    h2 = soup.select_one("div.col-sm-8 h2") or soup.select_one("h2.blue")
+    container = h2.find_parent("div") if h2 else None
+    if container is None:
+        container = soup.select_one("div.col-sm-8")
+    if container is None:
+        return ""
+    for bad in container.select("sup, .modal, script, style, noscript"):
+        bad.decompose()
+    # Strip footnote digits that end annotation links: "ago:1" -> "ago:"
+    for a in container.select("a[href*='annotations'], a[data-toggle='modal']"):
+        txt = a.get_text()
+        new = re.sub(r"(?<=[^\s\d])\d{1,2}(\s*)$", r"\1", txt)
+        if new != txt:
+            a.string = new
+    for br in container.find_all("br"):
+        br.replace_with("\n")
+    blocks: list[str] = []
+    seen_nodes: set[int] = set()
+    for el in container.find_all(["p", "blockquote"]):
+        if any(id(par) in seen_nodes for par in el.parents):
+            continue
+        seen_nodes.add(id(el))
+        if el.name == "blockquote":
+            raw = el.get_text("")
+            lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in raw.splitlines()]
+            txt = "\n".join(ln for ln in lines if ln)
+        else:
+            txt = re.sub(r"\s+", " ", el.get_text("")).strip()
+        if not txt or txt == "\xa0":
+            continue
+        low = txt.lower()
+        if low.startswith("note:") or "surlalune" in low or "©" in txt:
+            break
+        # Author attribution ends the tale ("by Charles Perrault"); keep as metadata
+        if re.match(r"^(?:by|retold by|collected by)\s+\S", txt, re.I) and len(txt.split()) <= 8:
+            break
+        if "amazon.com" in low:
+            break
+        if any(x in low for x in ("annotated version", "recommend reading", "amazon associate", "ko-fi", "donate")):
+            continue
+        blocks.append(txt)
+    # Drop a trailing bibliographic citation line (e.g. "St. Nicholas Magazine. May 1875.")
+    while blocks and len(blocks[-1].split()) <= 10 and re.search(r"\b1[5-9]\d\d\b|magazine|journal|press|edited by", blocks[-1], re.I):
+        blocks.pop()
+    text = "\n\n".join(blocks)
+    text = text.replace("\xa0", " ")
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def fetch_surlalune(limit: int = 18) -> list[dict]:
     """SurLaLune annotated fairy tales (public-domain tale texts)."""
     out: list[dict] = []
@@ -327,31 +502,8 @@ def fetch_surlalune(limit: int = 18) -> list[dict]:
                 title = h1.get_text(" ", strip=True)
                 title = re.sub(r"\s*[|\u2014\-].*SurLaLune.*$", "", title, flags=re.I).strip()
                 title = re.sub(r"\s*Annotated Tale\s*$", "", title, flags=re.I).strip()
-            paras = []
-            for p in soup.find_all("p"):
-                t = p.get_text(" ", strip=True)
-                if not t or len(t) < 40:
-                    continue
-                low = t.lower()
-                if any(
-                    x in low
-                    for x in (
-                        "annotated version", "recommend reading", "return to",
-                        "surlaune", "surlalune", "bookstore", "click here",
-                    )
-                ):
-                    continue
-                paras.append(t)
-            body = _clean("\n\n".join(paras))
-            # Trim trailing annotation dump if huge
-            if _word_count(body) > 1400:
-                parts = body.split("\n\n")
-                acc = []
-                for part in parts:
-                    acc.append(part)
-                    if _word_count("\n\n".join(acc)) >= 900:
-                        break
-                body = "\n\n".join(acc)
+            body = _surlalune_tale_text(soup)
+            # Never trim: a story that is too long is skipped at pick time, not cut.
             s = _story("surlalune", "SurLaLune Fairy Tales", title, url, body, genre="legend")
             if s:
                 out.append(s)
@@ -583,7 +735,7 @@ def fetch_gutenberg_au(limit: int = 12) -> list[dict]:
                     break
                 if getattr(sib, "get_text", None):
                     t = sib.get_text(" ", strip=True)
-                    if t and len(t) > 20:
+                    if t:
                         parts.append(t)
             body = _clean("\n\n".join(parts))
             s = _story(
@@ -693,7 +845,7 @@ def fetch_ruskazki(limit: int = 14) -> list[dict]:
                 paras = []
                 for p in art.find_all("p"):
                     t = p.get_text(" ", strip=True)
-                    if not t or len(t) < 20:
+                    if not t:
                         continue
                     low = t.lower()
                     if any(x in low for x in ("уменьшить шрифт", "увеличить шрифт", "подпис", "вконтакте", "facebook")):
@@ -767,7 +919,7 @@ def fetch_lukoshko(limit: int = 12) -> list[dict]:
                 paras = [
                     p.get_text(" ", strip=True)
                     for p in content.find_all("p")
-                    if len(p.get_text(strip=True)) > 25
+                    if p.get_text(strip=True)
                 ]
                 if paras:
                     body = _clean("\n\n".join(paras))
@@ -1128,30 +1280,44 @@ def pick_unused_story(
         if _SKIP_TITLE_RE.search(title):
             continue
         w = int(s.get("words", 0) or 0)
-        # Hard floor: prefer substantial narratives (aligned with finalize gates)
-        min_w = 120 if age_band == "under7" else 150
-        if w < min_w or w > 1400:
+        # Never cut a story: over-long sources are skipped here instead.
+        min_w = 80 if age_band == "under7" else 150
+        if w < min_w or w > PICK_MAX_WORDS:
             continue
         pool.append(s)
+    if age_band == "under7":
+        # Under-7: choose naturally short source tales (never shorten a long one).
+        short = [s for s in pool if int(s.get("words", 0) or 0) <= UNDER7_MAX_WORDS]
+        if not short:
+            short = [s for s in pool if int(s.get("words", 0) or 0) <= UNDER7_FALLBACK_MAX]
+            log.warning("under7: no source <=%s words; widened to <=%s (found %s)",
+                        UNDER7_MAX_WORDS, UNDER7_FALLBACK_MAX, len(short))
+        pool = short
     if not pool:
         return None
 
     def score(s: dict) -> int:
         sc = 0
         w = int(s.get("words", 0) or 0)
-        # Word-count tiers
-        if w >= 400:
-            sc += 8
-        elif w >= 280:
-            sc += 6
-        elif w >= 200:
-            sc += 4
-        elif w >= 150:
-            sc += 2
+        # Word-count tiers (moderate length preferred so full audio stays reasonable)
+        if age_band == "under7":
+            if 150 <= w <= 450:
+                sc += 6
+            elif w <= 500:
+                sc += 3
+        else:
+            if 400 <= w <= 1200:
+                sc += 8
+            elif 280 <= w < 400:
+                sc += 6
+            elif 1200 < w <= PICK_MAX_WORDS:
+                sc += 4
+            elif w >= 150:
+                sc += 2
 
         if s.get("genre") == genre:
             sc += 5
-        if s.get("genre") in ("legend", "history", "animals"):
+        if s.get("genre") in ("legend", "animals"):
             sc += 2
         if _fits_age(w, age_band):
             sc += 4
@@ -1188,11 +1354,13 @@ def pick_unused_story(
     top = top[:16]
     chosen = random.choice(top)
     log.info(
-        "pick story score=%s words=%s source=%s title=%s (tier=%s/%s)",
+        "pick story score=%s words=%s source=%s title=%s tale_type=%s age=%s (tier=%s/%s)",
         score(chosen),
         chosen.get("words"),
         chosen.get("source"),
         (chosen.get("title_en") or "")[:60],
+        chosen.get("tale_type"),
+        age_band,
         len(top),
         len(ranked),
     )

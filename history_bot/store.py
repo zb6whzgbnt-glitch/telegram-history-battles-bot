@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 
 from .config import DB_PATH
 
-GENRES = ["animals", "legend", "human", "history"]
+# Soft source preference only; the card label comes from the story itself
+# (stories.classify_tale_type), never from this rotation.
+GENRES = ["animals", "legend", "human"]
 
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)

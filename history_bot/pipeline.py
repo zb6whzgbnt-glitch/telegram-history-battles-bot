@@ -9,18 +9,13 @@ from telegram.error import Forbidden, TelegramError
 
 from . import store
 from .config import TELEGRAM_BOT_TOKEN, TTS_VOICE
-from .gemini_client import arabize_story, synthesize_long, _disambiguate_hero_title
-from .stories import pick_unused_story
+from .gemini_client import arabize_story, synthesize_parts
+from .stories import pick_unused_story, tale_type_label
 from .tts import pcm_to_ogg
 
 log = logging.getLogger("history_bot.pipeline")
 
-GENRE_AR = {
-    "animals": "حيوانات",
-    "legend": "أسطورة",
-    "human": "بشرية",
-    "history": "تاريخية للأطفال",
-}
+_AR_DIGITS = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
 
 
 def _safe_filename(title: str, story_id: str) -> str:
@@ -30,8 +25,8 @@ def _safe_filename(title: str, story_id: str) -> str:
     return f"{base[:80]}.txt"
 
 
-def _prepare_episode_sync() -> tuple[dict, str, str, bytes, dict] | None:
-    """Pick/finalize up to 3 source stories; never ship local-template fallback."""
+def _prepare_episode_sync() -> tuple[dict, str, str, list[bytes], dict, dict] | None:
+    """Pick/translate up to 3 source stories faithfully; never ship a local template."""
     from .gemini_client import StoryQualityError
 
     profile = store.peek_episode_profile()
@@ -52,30 +47,32 @@ def _prepare_episode_sync() -> tuple[dict, str, str, bytes, dict] | None:
             break
 
         attempted.add(story["id"])
-        # Reserve original English title BEFORE arabize/TTS so it never repeats
+        # Reserve original title BEFORE translation/TTS so it never repeats
         store.reserve_story(story["id"], story.get("title_en", ""))
         log.info(
-            "prepare episode attempt=%s/3 source=%s title=%s words=%s",
+            "prepare episode attempt=%s/3 source=%s title=%s words=%s tale_type=%s",
             attempt,
             story.get("source"),
             (story.get("title_en") or "")[:80],
             story.get("words"),
+            story.get("tale_type"),
         )
-        used_heroes = store.used_hero_keys(limit=400)
+        # Previously used Arabic character names: only to vary names, never titles.
+        used_names = store.used_hero_keys(limit=300)
         try:
-            title_ar, body_ar = arabize_story(
+            title_ar, body_ar, meta = arabize_story(
                 story,
                 age_band=profile["age_band"],
                 genre=profile["genre"],
-                used_heroes=used_heroes,
+                used_heroes=used_names,
             )
         except (StoryQualityError, RuntimeError) as exc:
             last_err = exc
             log.warning(
-                "discard source after finalize/quality failure attempt=%s/3 id=%s: %s",
+                "discard source after translation/fidelity failure attempt=%s/3 id=%s: %s",
                 attempt,
                 story["id"],
-                str(exc)[:200],
+                str(exc)[:300],
             )
             continue
         except Exception as exc:
@@ -87,28 +84,21 @@ def _prepare_episode_sync() -> tuple[dict, str, str, bytes, dict] | None:
             )
             continue
 
-        # Reserve Arabic hero/title name so concurrent runs cannot collide
-        if not store.reserve_hero(title_ar, story["id"]):
-            blocked = store.used_hero_normalized_keys()
-            for _ in range(6):
-                blocked = blocked | {store.normalize_hero_name(title_ar)}
-                title_ar = _disambiguate_hero_title(title_ar, body_ar, blocked)
-                if store.reserve_hero(title_ar, story["id"]):
-                    break
-            else:
-                log.error("hero reserve failed after disambiguation title=%s", title_ar[:60])
-        body_words = len((body_ar.split("المصدر:")[0] if "المصدر:" in body_ar else body_ar).split())
+        for name in (meta.get("names") or [])[:8]:
+            store.reserve_hero(name, story["id"])
         log.info(
-            "episode ready hero_title=%s body_words~%s voice=%s attempt=%s",
+            "episode ready title_ar=%s original_title=%s src_words=%s ar_words=%s ratio=%s voice=%s",
             title_ar[:80],
-            body_words,
+            (story.get("title_en") or "")[:80],
+            meta.get("source_words"),
+            meta.get("arabic_words"),
+            meta.get("ratio"),
             TTS_VOICE,
-            attempt,
         )
-        # Always Aoede — never alternate voices mid-story or across episodes
-        pcm, rate = synthesize_long(body_ar, TTS_VOICE)
-        ogg = pcm_to_ogg(pcm, rate)
-        return story, title_ar, body_ar, ogg, profile
+        # Always Aoede; long stories → several ordered voice parts (never shortened)
+        voices = synthesize_parts(body_ar, TTS_VOICE)
+        oggs = [pcm_to_ogg(pcm, rate) for pcm, rate in voices]
+        return story, title_ar, body_ar, oggs, profile, meta
 
     log.error(
         "prepare episode failed after %s attempts last=%s",
@@ -118,16 +108,31 @@ def _prepare_episode_sync() -> tuple[dict, str, str, bytes, dict] | None:
     return None
 
 
+def build_card(story: dict, title_ar: str, body_ar: str, age_band: str) -> str:
+    age_ar = "دون 7" if age_band == "under7" else "8+"
+    genre_ar = tale_type_label(story)
+    src_line = f"المصدر: {story.get('source', '')}"
+    if story.get("title_en"):
+        src_line += f" — العنوان الأصلي: {story['title_en']}"
+    body = body_ar.split("المصدر:")[0].rstrip() if "المصدر:" in body_ar else body_ar.rstrip()
+    return (
+        f"{title_ar}\n"
+        f"النوع: {genre_ar} | العمر: {age_ar}\n"
+        f"{src_line}\n"
+        f"الراوي: {TTS_VOICE} (أنثى — راوية قصص أطفال هادئة ومستقرة)\n\n"
+        f"{body}\n"
+    )
+
+
 async def send_one_to(user_ids: list[int], bot: Bot | None = None) -> str | None:
     try:
-        prepared = await asyncio.wait_for(asyncio.to_thread(_prepare_episode_sync), timeout=700)
+        prepared = await asyncio.wait_for(asyncio.to_thread(_prepare_episode_sync), timeout=2100)
     except Exception:
         log.exception("prepare story episode failed")
         return None
     if not prepared:
         return None
-    story, title_ar, body_ar, ogg, profile = prepared
-    age_ar = "دون 7" if profile["age_band"] == "under7" else "8+"
+    story, title_ar, body_ar, oggs, profile, meta = prepared
 
     own = bot is None
     if bot is None:
@@ -135,15 +140,12 @@ async def send_one_to(user_ids: list[int], bot: Bot | None = None) -> str | None
         await bot.initialize()
 
     delivered = 0
-    # Full story as .txt document (with tashkeel); short caption = title
-    doc_text = (
-        f"{title_ar}\n"
-        f"النوع: {GENRE_AR.get(profile['genre'], profile['genre'])} | العمر: {age_ar}\n"
-        f"الراوي: {TTS_VOICE} (أنثى — راوية قصص أطفال هادئة ومستقرة)\n\n"
-        f"{body_ar}\n"
-    )
+    # Full story as .txt document (with tashkeel); caption = translated title
+    doc_text = build_card(story, title_ar, body_ar, profile["age_band"])
     filename = _safe_filename(title_ar, story["id"])
     caption = title_ar[:1024]
+    log.info("card genre=%s source=%s original_title=%s voices=%s",
+             tale_type_label(story), story.get("source"), story.get("title_en"), len(oggs))
 
     try:
         for uid in user_ids:
@@ -156,12 +158,16 @@ async def send_one_to(user_ids: list[int], bot: Bot | None = None) -> str | None
                     filename=filename,
                     caption=caption,
                 )
-                await bot.send_voice(
-                    chat_id=uid,
-                    voice=BytesIO(ogg),
-                    caption=caption,
-                    filename=f"{story['id']}.ogg",
-                )
+                for i, ogg in enumerate(oggs, 1):
+                    vcap = caption if len(oggs) == 1 else (
+                        f"{caption} — الجزء {str(i).translate(_AR_DIGITS)} من {str(len(oggs)).translate(_AR_DIGITS)}"
+                    )
+                    await bot.send_voice(
+                        chat_id=uid,
+                        voice=BytesIO(ogg),
+                        caption=vcap[:1024],
+                        filename=f"{story['id']}_{i}.ogg",
+                    )
                 store.log_send(story["id"], uid, True)
                 delivered += 1
             except Forbidden:
@@ -172,7 +178,8 @@ async def send_one_to(user_ids: list[int], bot: Bot | None = None) -> str | None
                 log.warning("send failed user=%s err=%s", uid, exc)
         if delivered:
             store.mark_sent(story["id"], title_en=story.get("title_en", ""))
-            store.mark_hero_sent(title_ar, story["id"])
+            for name in (meta.get("names") or [])[:8]:
+                store.mark_hero_sent(name, story["id"])
             store.advance_episode_profile()
             return title_ar
         return None
