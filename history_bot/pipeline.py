@@ -12,6 +12,7 @@ from .config import TELEGRAM_BOT_TOKEN, TTS_VOICE
 from .gemini_client import arabize_story, synthesize_parts
 from .stories import pick_unused_story, tale_type_label
 from .tts import pcm_to_ogg
+from .story_images import build_scenes_zip, images_enabled
 
 log = logging.getLogger("history_bot.pipeline")
 
@@ -149,6 +150,19 @@ async def send_one_to(user_ids: list[int], bot: Bot | None = None) -> str | None
     log.info("card genre=%s source=%s original_title=%s voices=%s",
              tale_type_label(story), story.get("source"), story.get("title_en"), len(oggs))
 
+    zip_bytes: bytes | None = None
+    zip_meta: dict = {}
+    zip_name = f"{story['id']}_scenes.zip"
+    if images_enabled():
+        try:
+            zip_bytes, _paths, zip_meta = await asyncio.to_thread(
+                build_scenes_zip, title_ar, body_ar
+            )
+            log.info("story images ready meta=%s", zip_meta)
+        except Exception:
+            log.exception("story images generation failed; sending text+voice only")
+            zip_bytes = None
+
     try:
         for uid in user_ids:
             try:
@@ -170,6 +184,17 @@ async def send_one_to(user_ids: list[int], bot: Bot | None = None) -> str | None
                         caption=vcap[:1024],
                         filename=f"{story['id']}_{i}.ogg",
                     )
+                if zip_bytes:
+                    zbuf = BytesIO(zip_bytes)
+                    zbuf.name = zip_name
+                    await bot.send_document(
+                        chat_id=uid,
+                        document=zbuf,
+                        filename=zip_name,
+                        caption=(f"مشاهد القصة ({zip_meta.get('scenes', '?')} صورة) — 16:9")[:1024],
+                    )
+                    log.info("sent scenes zip user=%s scenes=%s kb=%.0f",
+                             uid, zip_meta.get("scenes"), len(zip_bytes) / 1024)
                 store.log_send(story["id"], uid, True)
                 delivered += 1
             except Forbidden:

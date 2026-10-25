@@ -5,6 +5,20 @@ on:
     # Asia/Riyadh UTC+3 → every 3h at :00 local
     - cron: "0 21,0,3,6,9,12,15,18 * * *"
   workflow_dispatch:
+    inputs:
+      with_images:
+        description: "Prototype: generate Gemini 16:9 scene ZIP (STORY_IMAGES)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      image_max:
+        description: "Max scene images when with_images=true"
+        required: false
+        default: "15"
+        type: string
 
 concurrency:
   group: kids-story-send
@@ -56,6 +70,9 @@ jobs:
           SUBSCRIBER_CHAT_IDS: ${{ secrets.SUBSCRIBER_CHAT_IDS }}
           TZ: Asia/Riyadh
           PYTHONUNBUFFERED: "1"
+          # Scheduled runs leave STORY_IMAGES unset (off). Manual dispatch can enable.
+          STORY_IMAGES: ${{ github.event_name == 'workflow_dispatch' && inputs.with_images == 'true' && '1' || '' }}
+          STORY_IMAGE_MAX: ${{ github.event_name == 'workflow_dispatch' && inputs.image_max || '15' }}
           # Polling off by default (scripts/gha_send_story.py); set GHA_POLL_COMMANDS=1 to enable.
         run: |
           mkdir -p data

@@ -88,7 +88,12 @@ def _poll_enabled() -> bool:
 
 
 def main() -> None:
-    mode = (sys.argv[1] if len(sys.argv) > 1 else "all").strip()
+    argv = [a for a in sys.argv[1:] if a]
+    if "--with-images" in argv:
+        os.environ["STORY_IMAGES"] = "1"
+        argv = [a for a in argv if a != "--with-images"]
+        log.info("STORY_IMAGES enabled via --with-images")
+    mode = (argv[0] if argv else "all").strip()
     # Default: skip Telegram polling to avoid Conflict with any other getUpdates client.
     # Opt-in with GHA_POLL_COMMANDS=1 (or mode=commands).
     do_poll = mode == "commands" or (mode == "all" and _poll_enabled())

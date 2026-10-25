@@ -40,3 +40,10 @@ MALE_VOICE = "Aoede"
 SEND_HOURS = [(0, 0), (3, 0), (6, 0), (9, 0), (12, 0), (15, 0), (18, 0), (21, 0)]
 USER_AGENT = "KidsStoriesBot/1.0 (+personal telegram bedtime bot)"
 CATALOG_PATH = ROOT / "history_bot" / "data" / "battles.json"  # legacy battles catalog (tests)
+
+# Prototype: Gemini storyboard images (off by default; set STORY_IMAGES=1 to enable).
+STORY_IMAGES = os.environ.get("STORY_IMAGES", "").strip().lower() in ("1", "true", "yes", "on")
+STORY_IMAGE_MODEL = os.environ.get("STORY_IMAGE_MODEL", "gemini-3.1-flash-lite-image").strip()
+STORY_IMAGE_MAX = int(os.environ.get("STORY_IMAGE_MAX", "15"))
+STORY_IMAGE_WORDS_PER_SCENE = int(os.environ.get("STORY_IMAGE_WORDS_PER_SCENE", "20"))
+

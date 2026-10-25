@@ -7,3 +7,4 @@ data/*.log
 data/*.sqlite*
 *.ogg
 .DS_Store
+story-images-proto/
