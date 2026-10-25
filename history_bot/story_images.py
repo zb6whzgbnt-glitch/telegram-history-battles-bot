@@ -205,6 +205,7 @@ def _generate_one_image(prompt: str, *, model: str = IMAGE_MODEL) -> bytes:
         if alt not in models:
             models.append(alt)
 
+    free_tier_hits = 0
     for label, key in cands:
         for m in models:
             try:
@@ -219,7 +220,7 @@ def _generate_one_image(prompt: str, *, model: str = IMAGE_MODEL) -> bytes:
                         config=cfg,
                     )
 
-                resp = _call_with_retry(_gen, tries=5, base=4.0)
+                resp = _call_with_retry(_gen, tries=3, base=2.0)
                 data = _extract_image_bytes(resp)
                 if data:
                     log.info("image ok key=%s model=%s bytes=%s", label, m, len(data))
@@ -229,11 +230,18 @@ def _generate_one_image(prompt: str, *, model: str = IMAGE_MODEL) -> bytes:
                 last_err = exc
                 msg = str(exc)
                 log.warning("image soft-fail key=%s model=%s: %s", label, m, msg[:180])
-                if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-                    time.sleep(8)
+                if "free_tier" in msg or ("429" in msg and "RESOURCE_EXHAUSTED" in msg):
+                    free_tier_hits += 1
+                    # Paid image models are not on free tier; don't burn minutes retrying.
+                    if free_tier_hits >= 2:
+                        raise RuntimeError(
+                            "Gemini image models unavailable on free tier / quota exhausted "
+                            "(need paid Gemini billing for Nano Banana image gen). "
+                            f"last={msg[:160]}"
+                        ) from exc
+                    time.sleep(2)
                 continue
     raise last_err or RuntimeError("image generation failed")
-
 
 def build_scenes_zip(
     title_ar: str,
